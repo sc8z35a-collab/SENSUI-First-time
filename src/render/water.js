@@ -8,9 +8,9 @@ import * as THREE from 'three';
 
 export const water = {
   // extinction (absorption + scattering) per metre for the *view* path
-  sigma: new THREE.Vector3(0.30, 0.070, 0.050),
+  sigma: new THREE.Vector3(0.26, 0.042, 0.028),
   // diffuse attenuation of the down-welling sunlight per metre of depth
-  kd: new THREE.Vector3(0.36, 0.055, 0.030),
+  kd: new THREE.Vector3(0.33, 0.042, 0.021),
   // colour of sun+sky light entering at the surface (linear HDR)
   surfaceLight: new THREE.Color(1.0, 0.97, 0.9).multiplyScalar(3.2),
   // single-scattering albedo tint
@@ -62,24 +62,23 @@ vec3 waterAmbient(float y){
   float d = max(0.0, -y);
   return uSurfLight * exp(-uKd * d);
 }
-// cheap animated caustics (two layers of warped voronoi-ish sin patterns)
+// animated caustic network: thin bright lines where warped sine fields cross zero
 float causticLayer(vec2 p, float t){
-  vec2 i = p;
-  float c = 1.0, inten = 0.005;
-  for (int n = 0; n < 4; n++) {
-    float tt = t * (1.0 - (3.5 / float(n + 1)));
-    i = p + vec2(cos(tt - i.x) + sin(tt + i.y), sin(tt - i.y) + cos(tt + i.x));
-    c += 1.0 / length(vec2(p.x / (sin(i.x + tt) / inten), p.y / (cos(i.y + tt) / inten)));
+  vec2 q = p;
+  float s = 0.0;
+  for (int i = 0; i < 3; i++) {
+    q = mat2(1.6, 1.2, -1.2, 1.6) * q;
+    float fi = float(i);
+    s += sin(q.x + t * (1.0 + 0.3 * fi) + sin(q.y * 0.7 - t * 0.8 + fi));
   }
-  c /= 4.0;
-  c = 1.17 - pow(c, 1.4);
-  return pow(abs(c), 8.0);
+  float v = 1.0 - clamp(abs(s) / 2.2, 0.0, 1.0);
+  return v * v * v * v * v * v * v * v;
 }
 float caustics(vec3 wp){
-  vec2 p = wp.xz * 0.16 + wp.y * uSunDir.xz * 0.16;
-  float a = causticLayer(mod(p, 6.2831853) , uTime * 0.55);
-  float b = causticLayer(mod(p * 1.37 + 2.1, 6.2831853), uTime * 0.43 + 1.7);
-  return (a + b) * 0.5;
+  vec2 p = wp.xz * 0.22 + wp.y * uSunDir.xz * 0.22;
+  float a = causticLayer(p, uTime * 0.7);
+  float b = causticLayer(p * 0.73 + vec2(3.1, 1.7), uTime * 0.53 + 2.0);
+  return (a + b) * 1.4;
 }
 `;
 
@@ -120,7 +119,7 @@ function injectFragment(src, opts) {
       vec3 vdir = toFrag / max(dist, 1e-4);
       float mu = dot(vdir, uSunDir);
       float phase = 0.55 + 0.9 * pow(max(mu, 0.0), 6.0) + 0.25 * max(-vdir.y, 0.0) * 0.0 + 0.35 * max(vdir.y, 0.0);
-      vec3 inscatter = amb * uScatTint * phase * 0.32;
+      vec3 inscatter = amb * uScatTint * phase * 0.22;
       gl_FragColor.rgb = gl_FragColor.rgb * T + inscatter * (1.0 - T);
     }`,
   );

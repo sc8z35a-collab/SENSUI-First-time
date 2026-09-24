@@ -1,0 +1,3 @@
+html,body{margin:0;height:100%;overflow:hidden;background:#000;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;overscroll-behavior:none}
+#gl{position:fixed;inset:0;width:100vw;height:100vh;display:block}
+#ui{position:fixed;inset:0;pointer-events:none;font-family:"Rajdhani","Segoe UI","Hiragino Sans","Noto Sans JP",system-ui,sans-serif;color:#cfefff}
