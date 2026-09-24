@@ -55,10 +55,12 @@ function mesh(ox, oy, oz, n, v) {
     pos.push(ox + (i - 1 + sx / cnt) * v, oy + (j - 1 + sy / cnt) * v, oz + (k - 1 + sz / cnt) * v);
   }
 
-  // quads for edges whose base sample lies in world [0, n)  => sample index [1, n+1)
+  // quads for edges whose base sample lies in world [0, n]  => sample index [1, n+1]
+  // (one extra ring on the positive side overlaps the neighbour => hides LOD cracks)
   const indices = [];
   const cid = (i, j, k) => cellIndex[i + C * (j + C * k)];
-  for (let k = 1; k <= n; k++) for (let j = 1; j <= n; j++) for (let i = 1; i <= n; i++) {
+  const lim = n + 1;
+  for (let k = 1; k <= lim; k++) for (let j = 1; j <= lim; j++) for (let i = 1; i <= lim; i++) {
     const d0 = field[idx(i, j, k)];
     const s0 = d0 > 0;
     // x edge
