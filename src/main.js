@@ -1,52 +1,89 @@
-import * as THREE from 'three';
-import { Pipeline } from './render/pipeline.js';
-import { Terrain } from './world/terrain.js';
-import { createTerrainMaterial } from './render/terrainMaterial.js';
-import { updateWater, ambientAtDepth, waterUniforms } from './render/water.js';
-import { setMaxAnisotropy } from './render/textures.js';
+// ABYSSAL DESCENT — entry: boot screen, title, game over.
+import { Game } from './game.js';
 
-const canvas = document.getElementById('gl');
-const params0 = new URLSearchParams(location.search);
-const MANUAL = params0.has('manual');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: MANUAL });
-renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
-renderer.toneMapping = THREE.NoToneMapping;
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-setMaxAnisotropy(renderer.capabilities.getMaxAnisotropy());
-const pipe = new Pipeline(renderer);
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(70, 1, 0.05, 900);
 const params = new URLSearchParams(location.search);
-camera.position.set(+(params.get('x') ?? 40), +(params.get('y') ?? -55), +(params.get('z') ?? 120));
-camera.lookAt(camera.position.x + 20, camera.position.y + +(params.get('ly') ?? -6), camera.position.z - 30);
-const hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 1);
-scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xffffff, 1);
-sun.position.set(30, 100, 20);
-scene.add(sun);
-const spot = new THREE.SpotLight(0xfff4e0, 3000, 120, 0.45, 0.5, 2);
-camera.add(spot); spot.position.set(0.8, -0.5, 0); spot.target.position.set(0, -2, -10); camera.add(spot.target);
-scene.add(camera);
-if (!params0.has('nospot')) pipe.spots.push(spot); else spot.intensity = 0;
-window.__pipe = pipe;
-function resize() { const w = innerWidth, h = innerHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); pipe.setSize(w, h, +(params0.get('pr') ?? Math.min(devicePixelRatio, 2))); }
-addEventListener('resize', resize); resize();
-let mat = await createTerrainMaterial();
-if (params0.get('dbg') === 'std') { const { applyWater } = await import('./render/water.js'); mat = applyWater(new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 1 }), { caustics: params0.has('c') }); }
-if (params0.get('dbg') === 'raw') mat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 1 });
-const terrain = new Terrain(scene, mat);
-window.__terrain = terrain;
-const clock = new THREE.Clock();
-function loop() {
-  const t = clock.getElapsedTime();
-  updateWater(t);
-  const a = ambientAtDepth(camera.position.y);
-  hemi.color.setRGB(a.r, a.g, a.b); hemi.groundColor.setRGB(a.r * 0.1, a.g * 0.15, a.b * 0.2); hemi.intensity = +(params0.get('hi') ?? 0.8);
-  sun.color.setRGB(a.r, a.g, a.b); sun.intensity = +(params0.get('si') ?? 2.5);
-  terrain.update(camera.position);
-  if (!MANUAL) pipe.render(scene, null, camera, t);
-  if (MANUAL) setTimeout(loop, 50); else requestAnimationFrame(loop);
+const canvas = document.getElementById('gl');
+const ui = document.getElementById('ui');
+
+// portrait guard (landscape-only game)
+const rot = document.createElement('div');
+rot.id = 'rotate';
+rot.innerHTML = '<div class="ph"></div>スマートフォンを横向きにしてください<br><small>LANDSCAPE ONLY</small>';
+document.body.appendChild(rot);
+
+const scr = document.createElement('div');
+scr.className = 'screen';
+scr.innerHTML = `
+  <div class="title">
+    <h1>ABYSSAL DESCENT</h1><h2>深 海 潜 航</h2>
+    <p>有人潜水調査船 <b>DSV-11「わだつみ」</b> で、太陽光の届く大陸棚から水深 10,925 m のチャレンジャー海淵まで。<br>
+    浸水・火災・電源喪失・絡まり… あらゆるトラブルに対処しながら、地球最後のフロンティアを探査せよ。</p>
+    <div class="row" id="menu" style="display:none"></div>
+    <div class="spec">TITANIUM Ø2.1 m PRESSURE SPHERE · DESIGN DEPTH 11,000 m · 96 kWh Li-ion · 6 THRUSTERS · VBT 400 L</div>
+  </div>
+  <div class="load"><span id="ldTxt">起動中…</span><div class="bar"><i id="ldBar"></i></div></div>`;
+ui.appendChild(scr);
+const ldTxt = scr.querySelector('#ldTxt'), ldBar = scr.querySelector('#ldBar'), menu = scr.querySelector('#menu');
+
+const game = new Game(canvas, ui, params);
+window.__game = game;
+
+function btn(label, cls, fn) {
+  const b = document.createElement('button');
+  b.className = 'hb ' + cls; b.innerHTML = label;
+  b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+  menu.appendChild(b);
+  return b;
 }
-loop();
-window.__shot = () => { pipe.render(scene, null, camera, clock.getElapsedTime()); return canvas.toDataURL('image/jpeg', 0.9); };
+
+function showTitle() {
+  menu.innerHTML = '';
+  const save = Game.hasSave();
+  btn('潜航開始<small>NEW DIVE</small>', 'primary', () => begin(false));
+  if (save) btn(`続きから<small>CONTINUE · ${Math.round(-save.sub.pos[1])} m</small>`, '', () => begin(true));
+  btn('操作説明<small>HOW TO PLAY</small>', '', help);
+  menu.style.display = 'flex';
+  scr.querySelector('.load').style.display = 'none';
+}
+
+function help() {
+  menu.innerHTML = '';
+  const p = document.createElement('p');
+  p.style.textAlign = 'left';
+  p.innerHTML = `<b>左スティック</b>: 前進/後進・旋回　<b>右スティック</b>: 横移動・上昇/下降　<b>▲▼</b>: 垂直スラスター<br>
+    <b>画面中央ドラッグ</b>: 見回す（主観測窓・左右側窓・下部窓）　<b>コックピットをタップ</b>: ボタン・ブレーカー・MFD を直接操作<br>
+    <b>注水/排水</b>: 可変バラスト(VBT)で浮力調整。潜るには注水、浮上するには排水かウェイト投棄。<br>
+    <b>AP</b>: 自動操縦（方位/深度/高度/速力保持・自動潜航・定点保持・目的地へ自動航行・自動浮上・時間加速）<br>
+    <b>DC</b>: 異常発生時の対処。浸水の遮断・クランプ・シーラント、ブレーカー復帰、消火、スラスター再起動など。<br>
+    深く潜るほど水圧は増し、トラブルは増える。船殻の限界を超えれば一瞬で圧壊する。生きて帰還せよ。`;
+  menu.appendChild(p);
+  btn('戻る', '', showTitle);
+}
+
+function begin(fromSave) {
+  scr.classList.add('hide');
+  game.start(fromSave);
+}
+
+game.onEnd = (cause, st, death) => {
+  const t = st.time;
+  const tm = `${Math.floor(t / 3600)}:${String(Math.floor(t / 60) % 60).padStart(2, '0')}:${String(Math.floor(t) % 60).padStart(2, '0')}`;
+  const ok = cause === 'surface';
+  setTimeout(() => {
+    scr.className = 'screen' + (ok ? '' : ' over');
+    scr.innerHTML = `<div class="title">
+      <h1>${ok ? '浮上・回収成功' : 'LOST AT SEA'}</h1><h2>${ok ? 'RECOVERED' : death?.[1] || ''}</h2>
+      ${ok ? '<p>わだつみは無事に浮上し、母船に回収された。</p>' : `<p><b>${death?.[0] || ''}</b> — ${death?.[2] || ''}</p>`}
+      <div class="stats">潜航時間 ${tm}　最大深度 ${Math.round(st.maxDepth).toLocaleString()} m　航走距離 ${Math.round(st.dist).toLocaleString()} m<br>
+      発見生物 ${st.species}/${st.speciesTotal}　調査地点 ${st.pois}/${st.poisTotal}　試料 ${st.samples}　発生トラブル ${st.incidents}</div>
+      <div class="row"><button class="hb primary" id="again">もう一度潜る<small>DIVE AGAIN</small></button></div></div>`;
+    scr.querySelector('#again').addEventListener('click', () => location.reload());
+  }, ok ? 800 : 2600);
+};
+
+game.boot((f, txt) => { ldBar.style.width = `${Math.round(f * 100)}%`; ldTxt.textContent = txt; })
+  .then(() => {
+    if (params.has('autostart')) begin(params.get('autostart') === 'save');
+    else showTitle();
+  })
+  .catch((e) => { console.error(e); ldTxt.textContent = '起動エラー: ' + e.message; });
