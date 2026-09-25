@@ -103,6 +103,10 @@ export class Autopilot {
     const s = this.sub;
     const ok = this.sys.sensors.sonar && this.sys.powered('SONAR');
     if (!ok) { this.oas.threat = 0; this.oas.beams = []; return; }
+    // ping repetition ~30 Hz of sim time (keeps cost constant under time compression)
+    this._sonT = (this._sonT || 0) + dt;
+    if (this._sonT < 1 / 30 && this.oas.beams.length) return;
+    this._sonT = 0;
     const beams = this.oas.beams;
     const NB = 15;
     if (beams.length !== NB) { beams.length = 0; for (let i = 0; i < NB; i++) beams.push({ a: 0, e: 0, d: 999 }); }
@@ -123,6 +127,27 @@ export class Autopilot {
     this.oas.threat = THREE.MathUtils.clamp(1 - (ttc - 6) / 20, 0, 1) * (min < this.oas.range ? 1 : 0);
   }
 
+  // Onboard bathymetric chart (pre-surveyed multibeam grid): min clearance along the next ~120 m of track.
+  _chart(dt) {
+    this._chartT = (this._chartT || 0) - dt;
+    if (this._chartT > 0) return this.chartFloor;
+    this._chartT = 0.5;
+    const s = this.sub;
+    const v = new THREE.Vector3(s.vel.x, 0, s.vel.z);
+    let dir = v.lengthSq() > 0.04 ? v.normalize() : s.forward(new THREE.Vector3()).setY(0).normalize();
+    let reach = 120;
+    if (this.nav.on && this.nav.wp.length) { const wp = this.nav.wp[this.nav.idx]; const d = new THREE.Vector3(wp.x - s.pos.x, 0, wp.z - s.pos.z); reach = Math.min(120, d.length() + 10); if (d.lengthSq() > 1) dir = d.normalize(); }
+    let top = -1e9;
+    for (const f of [0, 0.12, 0.3, 0.5, 0.75, 1]) {
+      const k = f * reach;
+      const x = s.pos.x + dir.x * k, z = s.pos.z + dir.z * k;
+      const g = groundHeight(x, z, Math.min(0, s.pos.y + 150));
+      if (g > top) top = g;
+    }
+    this.chartFloor = top; // world y of the highest seabed ahead
+    return top;
+  }
+
   _altimeter() {
     const s = this.sub;
     // down-looking DVL beams => altitude
@@ -136,6 +161,7 @@ export class Autopilot {
     if (this._altTimer <= 0) { this._altimeter(); this._altTimer = 0.1; }
     this._sonar(dt);
     const m = this.measure();
+    if (this.engaged) this._chart(dt);
     this.m = m;
     const out = { surge: pilotInput.surge, yaw: pilotInput.yaw, heave: pilotInput.heave, sway: pilotInput.sway, pitch: 0 };
     this.warn = '';
@@ -169,7 +195,7 @@ export class Autopilot {
         this.depth.target = wpDepth;
         this._navVert = true;
       }
-      if (hd < 6 && Math.abs(-wp.y - s.depth) < 6) {
+      if (hd < 8 && Math.abs(-wp.y - s.depth) < 12) {
         if (this.nav.idx < this.nav.wp.length - 1) this.nav.idx++;
         else {
           sys.msg(`目的地到着: ${this.nav.poi?.name || 'WP'} — 定点保持に移行`, 'good');
@@ -222,6 +248,11 @@ export class Autopilot {
       let tgtD = this.depth.target;
       // safety floor: never go closer than 10 m above ground when DVL available
       if (m.dvl) tgtD = Math.min(tgtD, m.depth + m.alt - 10);
+      if (this.chartFloor !== undefined && sys.powered('NAV')) {
+        const clr = this._navVert ? 18 : 10;
+        tgtD = Math.min(tgtD, -this.chartFloor - clr);
+        if (-this.chartFloor - clr < this.depth.target - 1 && this._navVert) tags.push('TF');
+      }
       const e = tgtD - m.depth;
       const vmax = this._navVert ? 1.0 : 0.8;
       targetVz = THREE.MathUtils.clamp(e * 0.08, -vmax, vmax);
@@ -232,11 +263,13 @@ export class Autopilot {
       out.heave = -this.pid.vz.step(targetVz - m.vz, dt);
       // automatic ballast management: trim VBT so that thrusters are unloaded on long holds
       if (this.ballastAuto && sys.powered('HYD')) {
-        const want = this.ascent.on ? -1 : this.descent.on && targetVz > 0.3 ? (s.trimState < 90 ? 1 : 0) : 0;
-        const bias = this.pid.vz.i; // integral term ~ steady heave need
-        let cmd = want;
-        if (!want) cmd = Math.abs(bias) > 0.12 ? (bias > 0 ? 1 : -1) * 0.5 : 0; // integral>0 means we need to go down more -> flood
-        s.vbtCmd = cmd;
+        // desired heaviness (kg, + = heavy). Integral term of the heave loop = steady thrust the
+        // ballast should take over (heave<0 pushes down => boat is too light => flood).
+        const bias = -this.pid.vz.i;
+        let wantKg = this.ascent.on ? -150 : this.descent.on ? THREE.MathUtils.clamp(targetVz * 110, 0, 110) : THREE.MathUtils.clamp(-bias * 220, -60, 60);
+        if (s.grounded || (m.dvl && m.alt < 4)) wantKg = Math.min(wantKg, -20);
+        const err = wantKg - s.trimState;
+        s.vbtCmd = Math.abs(err) < 10 ? 0 : THREE.MathUtils.clamp(err / 40, -1, 1);
       }
     }
     if (this.ascent.on && s.trimState > 0 && sys.powered('HYD')) s.vbtCmd = -1;

@@ -68,9 +68,9 @@ export class Exterior {
     // foam cheeks either side of the sphere (seen from side ports)
     for (const s of [-1, 1]) {
       const cheek = new THREE.Mesh(new RoundedBoxGeometry(0.7, 1.9, 2.4, 5, 0.25), foam);
-      cheek.position.set(s * 1.55, -0.1, -1.7); R.add(cheek);
+      cheek.position.set(s * 1.55, -0.1, -0.2); R.add(cheek);
       const stripe = new THREE.Mesh(new RoundedBoxGeometry(0.72, 0.18, 2.42, 3, 0.06), foamOrange);
-      stripe.position.set(s * 1.55, 0.55, -1.7); R.add(stripe);
+      stripe.position.set(s * 1.55, 0.55, -0.2); R.add(stripe);
     }
     // bow fairing above the sphere
     const nose = new THREE.Mesh(new THREE.SphereGeometry(1.4, 48, 24, 0, Math.PI * 2, 0, Math.PI * 0.42), foam);

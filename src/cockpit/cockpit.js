@@ -194,7 +194,7 @@ export class Cockpit {
         b.position.set(-w / 2 + (i + 0.5) * (w / 5), -h / 2 - 0.018, 0.018);
         bez.add(b);
       }
-      this.mfd[name] = { tex: t, ctx: t.userData.ctx, w: pw, h: ph, mesh: scr, bez };
+      this.mfd[name] = { tex: t, ctx: t.userData.ctx, w: pw, h: ph, mesh: scr, bez }; scr.userData.action = { type: 'mfd', id: name };
       return bez;
     };
     const mfdTilt = new THREE.Group(); mfdTilt.position.set(0, 0.03, -0.12); mfdTilt.rotation.x = -1.05; console_.add(mfdTilt);
@@ -214,6 +214,7 @@ export class Cockpit {
     btnLabels.forEach((l, i) => {
       const x = -0.55 + i * 0.085;
       const b = new THREE.Mesh(btnGeo, darkMetal); b.position.set(x, 0.032, 0.14); console_.add(b);
+      b.userData.action = { type: 'button', id: l }; (this.buttons ||= {})[l] = b;
       const led = new THREE.Mesh(ledGeo, new THREE.MeshBasicMaterial({ color: 0x111111, toneMapped: false }));
       led.position.set(x, 0.035, 0.11); console_.add(led);
       this.leds[l] = led;
@@ -285,7 +286,7 @@ export class Cockpit {
       const led = new THREE.Mesh(ledGeo, new THREE.MeshBasicMaterial({ color: 0x00ff66, toneMapped: false })); led.position.set(0.024, 0.018, 0.012); body.add(led);
       const lbl = new THREE.Mesh(new THREE.PlaneGeometry(0.1, 0.022), new THREE.MeshBasicMaterial({ map: placard(b.en, { w: 256, h: 56, bg: '#1b1e21', fg: '#d9dde0', border: false, font: `bold 30px ${MONO}` }), toneMapped: false }));
       lbl.position.set(x, y - 0.045, 0.028); lbl.material.color.setScalar(0.5); over.add(lbl);
-      this.breakerMeshes[b.id] = { lever, led };
+      this.breakerMeshes[b.id] = { lever, led }; body.userData.action = { type: 'breaker', id: b.id };
     });
     this.overhead = over;
 
