@@ -32,7 +32,7 @@ const DEATH = {
   power: ['全電源喪失', 'TOTAL POWER LOSS', '全バッテリーが枯渇し、生命維持が停止した。'],
 };
 
-const _v = new THREE.Vector3(), _q = new THREE.Quaternion(), _e = new THREE.Euler();
+const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _zero = new THREE.Vector3(), _q = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _e = new THREE.Euler();
 
 export class Game {
   constructor(canvas, ui, params) {
@@ -53,6 +53,7 @@ export class Game {
     this._clock = new THREE.Clock(false);
     this._t = 0;
     this._saveT = 20;
+    this._headOff = new THREE.Vector3();
   }
 
   // ------------------------------------------------------------------ boot
@@ -313,4 +314,232 @@ export class Game {
       this.bubbles.emit(p, new THREE.Vector3((Math.random() - 0.5) * 0.6, 0.3 + Math.random(), (Math.random() - 0.5) * 0.6), 0.02 + Math.random() * 0.08, 8 + Math.random() * 6);
     }
   }
+
+  // ------------------------------------------------------------------ lifecycle
+  start(fromSave) {
+    this.audio.start();
+    if (fromSave) this.load();
+    else {
+      this.sys.msg('DSV-11 わだつみ 潜航開始。全系統正常。', 'good');
+      setTimeout(() => this.radio('わだつみ、こちら母船かいれい。潜航を許可する。良い航海を。'), 2500);
+    }
+    this.state = 'play';
+    this.inc.clock = 0;
+    this.requestFullscreen();
+  }
+  requestFullscreen() {
+    const el = document.documentElement;
+    const fs = el.requestFullscreen || el.webkitRequestFullscreen;
+    const lock = () => screen.orientation?.lock?.('landscape').catch(() => {});
+    if (fs && !document.fullscreenElement) { try { const p = fs.call(el, { navigationUI: 'hide' }); p?.then?.(lock).catch(() => {}); } catch { /* ignore */ } } else lock();
+  }
+  abort() { this.save(); location.reload(); }
+
+  save() {
+    try {
+      const d = { v: 1, sub: this.sub.serialize(), sys: this.sys.serialize(), inc: this.inc.serialize(), ap: this.ap.serialize(), disc: [...this.discovered], sampled: [...this.sampled], samples: this.samples, sight: [...this.life.sightings], at: Date.now() };
+      localStorage.setItem(SAVE_KEY, JSON.stringify(d));
+    } catch (e) { console.warn('save failed', e); }
+  }
+  static hasSave() { try { const d = JSON.parse(localStorage.getItem(SAVE_KEY)); return d && d.v === 1 ? d : null; } catch { return null; } }
+  static clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch { /* ignore */ } }
+  load() {
+    const d = Game.hasSave(); if (!d) return;
+    this.sub.restore(d.sub); this.sys.restore(d.sys);
+    this.inc.sealant = d.inc?.sealant ?? 2;
+    Object.assign(this.ap.hdg, d.ap.hdg); Object.assign(this.ap.depth, d.ap.depth);
+    d.disc?.forEach((x) => this.discovered.add(x)); d.sampled?.forEach((x) => this.sampled.add(x)); this.samples = d.samples || 0;
+    d.sight?.forEach((x) => this.life.sightings.add(x));
+    this.sys.msg('航海記録を読み込みました', 'good');
+  }
+
+  resize() {
+    const w = innerWidth, h = innerHeight;
+    this.renderer.setSize(w, h, false);
+    this.camera.aspect = w / h;
+    this.camera.fov = THREE.MathUtils.clamp(64 * (1.9 / Math.max(1.3, w / h)) + 10, 66, 82);
+    this.camera.updateProjectionMatrix();
+    const dpr = devicePixelRatio || 1;
+    const pr = this.params.has('pr') ? +this.params.get('pr') : [Math.min(dpr, 1.5), Math.min(dpr, 2), Math.min(dpr, 3)][this.quality] ?? 2;
+    this.pipe.setSize(w, h, pr);
+    this._pr = pr;
+    const k = pr * h / 400;
+    this.cockpit.pMat.uniforms.uPR.value = k;
+    this.snow.mat.uniforms.uPR.value = k;
+    this.bubbles.mat.uniforms.uPR.value = k;
+  }
+  applyQuality() {
+    try { localStorage.setItem('ad-quality', this.quality); } catch { /* ignore */ }
+    const sm = [1024, 2048, 4096][this.quality];
+    for (const l of this.ext.lamps) if (l.L.castShadow) { l.L.shadow.mapSize.set(sm, sm); l.L.shadow.map?.dispose(); l.L.shadow.map = null; }
+    this.resize();
+  }
+
+  // ------------------------------------------------------------------ main loop
+  _manualLoop() { const step = () => { this._frame(1 / 20); setTimeout(step, 50); }; step(); }
+  _loop() {
+    requestAnimationFrame(this._loop);
+    const dt = Math.min(0.1, this._clock.getDelta());
+    this._frame(dt);
+  }
+
+  _frame(dt) {
+    this._t += dt;
+    const t = this._t;
+    if (this.state === 'play') {
+      this._acc += dt * this.timeScale;
+      let n = 0;
+      const cap = 60 * 16;
+      while (this._acc >= H && n < cap) { this._step(H); this._acc -= H; n++; if (this.state !== 'play') break; }
+      if (n >= cap) this._acc = 0;
+    } else if (this.state === 'title') {
+      this.sub.pos.y = -1.5 + Math.sin(t * 0.6) * 0.1;
+      this.sub.roll = Math.sin(t * 0.5) * 0.02; this.sub.pitch = Math.sin(t * 0.37) * 0.015;
+      this.sub.yaw += dt * 0.004;
+      this.sub._updateQuat();
+    }
+    this._visual(dt, t);
+    this._render(t);
+  }
+
+  _step(dt) {
+    const { sub, sys, inc, ap } = this;
+    const pilot = this.controls.read();
+    this.pilot = pilot;
+    if (this.controls.active && this.timeScale > 1) this.setTimeScale(1);
+    const cap = THREE.MathUtils.clamp(sys.pilotHealth * 1.4 - 0.2, 0, 1);
+    ap.update(dt, { surge: pilot.surge * cap, yaw: pilot.yaw * cap, heave: pilot.heave * cap, sway: pilot.sway * cap });
+    sub.step(dt, sys);
+    sys.activeCautions = inc.cautionCount;
+    sys.step(dt, this.env);
+    inc.step(dt);
+    this.crushMargin = SPEC.crushDepth * (1 - sys.hull.fatigue * 3 - (1 - sys.hull.integrity) * 0.5 - sys.hull.crack * 0.3) - sub.depth;
+    sub.siltStir = Math.max(0, sub.siltStir - dt * 0.05);
+    if (this.env.quake > 0) sub.extForce.set((Math.random() - 0.5) * 6000, (Math.random() - 0.5) * 4000, (Math.random() - 0.5) * 6000);
+
+    for (const p of POIS) {
+      const d = Math.hypot(p.x - sub.pos.x, p.y - sub.pos.y, p.z - sub.pos.z);
+      if (d < p.r * 0.9 && !this.discovered.has(p.id)) {
+        this.discovered.add(p.id);
+        sys.msg(`★ 調査地点到達: ${p.name}`, 'good');
+        this.audio.play('good');
+        setTimeout(() => this.radio(`${p.name}への到達を確認。素晴らしい。映像を記録せよ。`), 3000);
+      }
+      if (d < p.r * 0.6 && this.ext.armPose > 0.9 && !this.sampled.has(p.id) && sub.altitude < 6) {
+        this.sampled.add(p.id); this.samples++;
+        sys.msg(`マニピュレーターで試料採取: ${p.name}`, 'good');
+        this.audio.play('grind');
+      }
+    }
+    for (const m of [100, 200, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 10900]) {
+      if (sub.depth > m && !this._milestones.has(m)) {
+        this._milestones.add(m);
+        sys.msg(`深度 ${m.toLocaleString()} m 通過`, 'info');
+        if (m >= 1000 && m % 1000 === 0) setTimeout(() => this.radio(`深度${m}メートル通過を確認。全系統の状態を報告せよ。`), 1500);
+        if (m === 200) sys.msg('太陽光がほぼ届かない薄明層へ。外部照明を点灯せよ。', 'info');
+        if (m === 1000) sys.msg('漸深層 — 完全な暗黒の世界', 'info');
+        if (m === 10900) this.radio('信じられない…わだつみ、君は地球の最深部にいる。');
+      }
+    }
+    if (this._homeBound && !ap.nav.on && Math.hypot(sub.pos.x - MOTHERSHIP.x, sub.pos.z - MOTHERSHIP.z) < 40) { this._homeBound = false; ap.setMode('ascent', true); sys.msg('母船直下 — 自動浮上', 'good'); }
+    if (sub.depth < 1.5 && ap.ascent.on && ap.engaged && sub.maxDepth > 30) this._surface();
+
+    if (sub.vbtFlow < 0 && Math.random() < dt * 25) this._burst(1, -0.5);
+    if (sub.vbtFlow > 0 && Math.random() < dt * 10) this._burst(1, 0.9);
+    this._trailT = (this._trailT || 0) - dt;
+    if (this._trailT <= 0) { this._trailT = 2; this.trail.push(sub.pos.x, sub.pos.z); if (this.trail.length > 800) this.trail.splice(0, 2); }
+    this._saveT -= dt;
+    if (this._saveT <= 0) { this._saveT = 30; this.save(); }
+    if (sys.dead && this.state === 'play') this._die(sys.dead);
+  }
+
+  _surface() {
+    if (this.state !== 'play') return;
+    this.state = 'end';
+    this.audio.play('surface');
+    this.onEnd?.('surface', this._stats());
+    Game.clearSave();
+  }
+  _die(cause) {
+    this.state = 'end';
+    if (cause === 'implosion') { this.audio.play('implode'); this.flash = 1; this.pipe.params.flashColor.set(1, 1, 1); }
+    this.onEnd?.(cause, this._stats(), DEATH[cause]);
+    Game.clearSave();
+  }
+  _stats() {
+    const s = this.sub;
+    return { time: s.time, maxDepth: s.maxDepth, dist: s.distance, species: this.life.sightings.size, speciesTotal: Object.keys(SPECIES).length, pois: this.discovered.size, poisTotal: POIS.length, samples: this.samples, incidents: this.inc.history.length };
+  }
+
+  // ------------------------------------------------------------------ visuals
+  _visual(dt, t) {
+    const { sub, sys, ap, inc } = this;
+    const cam = this.camera;
+    const L = this.controls.look;
+    if (L.id === null) { L.yaw *= 1 - Math.min(1, dt * 0.25); L.pitch *= 1 - Math.min(1, dt * 0.25); }
+    const yawL = L.yaw + +(this.params.get('lx') ?? 0), pitchL = L.pitch + +(this.params.get('ly') ?? 0);
+    const eye = _v.copy(SPHERE_CENTER).add(EYE);
+    eye.x += Math.sin(yawL) * 0.12;
+    eye.z -= (1 - Math.cos(yawL)) * 0.05 - Math.max(0, -pitchL) * 0.12;
+    eye.y += Math.min(0, pitchL) * 0.05 - Math.max(0, -pitchL) * 0.06;
+    const accB = _v2.copy(sub.acc || _zero).applyQuaternion(_q2.copy(sub.quat).invert());
+    this._headOff.lerp(accB.multiplyScalar(-0.04).clampLength(0, 0.06), Math.min(1, dt * 3));
+    eye.add(this._headOff);
+    eye.y += Math.sin(t * (1.4 + sys.pilotStress * 1.5)) * 0.004 * (1 + sys.hypercapnia * 3);
+    cam.position.copy(eye).applyQuaternion(sub.quat).add(sub.pos);
+    this.shake = Math.max(0, Math.max(this.shake, inc.shake) - dt * 0.9);
+    let rpm = 0; for (const x of sub.thr) rpm = Math.max(rpm, Math.abs(x.rpm));
+    const thrV = rpm * 0.004 + (sub.thr.some((x) => x.fault === 'degraded' || x.jam > 0) ? 0.01 : 0);
+    const sh = this.shake * 0.03 + thrV;
+    _e.set(pitchL + (Math.random() - 0.5) * sh, yawL + (Math.random() - 0.5) * sh, (Math.random() - 0.5) * sh * 0.6, 'YXZ');
+    _q.setFromEuler(_e);
+    cam.quaternion.copy(sub.quat).multiply(_q);
+    cam.updateMatrixWorld();
+
+    updateWater(t, 1 + sub.siltStir * 2 + (this.env.turbidity ? 1.8 : 0) + (this.env.ventHeat || 0) * 1.5);
+    const a = ambientAtDepth(cam.position.y);
+    this.hemi.color.setRGB(a.r, a.g, a.b); this.hemi.groundColor.setRGB(a.r * 0.1, a.g * 0.15, a.b * 0.2);
+    this.sun.color.setRGB(a.r, a.g, a.b);
+    this.sun.position.set(cam.position.x + 30, cam.position.y + 100, cam.position.z + 20); this.sun.target.position.copy(cam.position);
+    this.pipe.params.silt = THREE.MathUtils.clamp(sub.siltStir * 0.6 + (this.env.turbidity ? 0.4 : 0), 0, 1);
+
+    this.ext.update(dt, t, { sub, sys, ap, lasers: this.lasers });
+    const extLight = this.ext.extLight;
+    this.terrain.update(sub.pos);
+    const st = { subPos: sub.pos, camPos: cam.position, extLight, subQuat: sub.quat };
+    this.props.update(t, st);
+    this.life.update(dt, t, sub.pos, sub.vel, extLight > 0.2, sub.depth, st);
+    this.snow.update(t, cam.position, this.ext.spots.filter((s) => s.visible && s.intensity > 1), a, sub.depth, this.pipe.params.silt);
+    this.bubbles.update(dt, a, extLight * 0.5);
+
+    const unresolved = inc.active.filter((f) => !f.resolved);
+    const alarmLevel = unresolved.some((f) => f.sev >= 3) || sub.floodL > 60 || sys.fire.active ? 2 : unresolved.length ? 1 : 0;
+    this.alarmLevel = alarmLevel;
+    const cst = { sub, sys, ap, inc, ambient: a, extLight, pilot: this.pilot || { surge: 0, yaw: 0, heave: 0 }, alarmLevel, sparkBurst: this._spark || null, trail: this.trail };
+    this._spark = null;
+    this.cockpit.update(dt, t, cst);
+    this.mfd.update(dt, cst);
+    if (this.state === 'play') {
+      this.hud.update(dt);
+      this.audio.update(dt, { sub, sys, inc, ap, env: this.env, alarmLevel, dead: sys.dead });
+    }
+
+    const P = this.pipe.params;
+    this.flash = Math.max(0, this.flash - dt * 1.5);
+    P.flash = this.flash;
+    P.redAlert = !sys.powered('CABIN') ? 0.8 : alarmLevel > 1 ? 0.25 + 0.25 * Math.sin(t * 6) : 0;
+    P.smoke = sys.fire.smoke * 0.8;
+    P.fog = (sys.condensation || 0) * 0.35;
+    if (this.state === 'end' && sys.dead) this._endT = (this._endT || 0) + dt;
+    P.blackout = Math.min(1, THREE.MathUtils.clamp((1 - sys.pilotHealth) * 1.1 - 0.35, 0, 1) + (this._endT ? this._endT * 0.5 : 0));
+    P.ca = 0.012 + sys.hypoxia * 0.05 + this.shake * 0.02;
+    // eye dark adaptation: exposure creeps up in darkness
+    const dark = extLight < 0.2 && sub.depth > 300 ? 1.6 : 1.0;
+    P.exposure += (dark - P.exposure) * Math.min(1, dt * 0.2);
+    P.vignette = 0.55 + sys.hypoxia * 0.4;
+    P.grain = 0.035 + (sub.depth > 1000 ? 0.02 : 0);
+    this.cockpit.scene.environmentIntensity = 0.12 + (sys.powered('CABIN') ? sys.lights.cabin * 0.3 : 0.02);
+  }
+
+  _render(t) { this.pipe.render(this.scene, this.cockpit.scene, this.camera, t); }
 }
