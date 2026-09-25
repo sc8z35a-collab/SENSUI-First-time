@@ -17,7 +17,7 @@ export const SPEC = {
   name: 'DSV-11 わだつみ',
   length: 8.4, beam: 3.0, height: 3.6,
   dryMass: 11800,             // kg incl. pilot & payload
-  V0: 11.681 + 0.24,          // m^3 displaced at surface (tuned: neutral with VBT 150 L + weights)
+  V0: 11.681 + 0.315,          // m^3 displaced at surface (tuned: neutral with VBT 150 L + weights)
   hullCompress: 3.84e-6,      // fractional volume loss per metre depth
   thermalExp: 6e-5,           // fractional volume change per °C (foam)
   vbtCap: 400,                // L
@@ -60,12 +60,12 @@ const PROBES = [
 
 export class Submarine {
   constructor() {
-    this.pos = new THREE.Vector3(12, -9, 150);
+    this.pos = new THREE.Vector3(12, -1.5, 150);
     this.vel = new THREE.Vector3();          // world m/s
     this.yaw = -0.35; this.pitch = 0; this.roll = 0;
     this.w = new THREE.Vector3();            // body rates: x=pitch rate, y=yaw rate, z=roll rate
     this.quat = new THREE.Quaternion();
-    this.vbt = 150;                          // L of water in VBT
+    this.vbt = 0;                          // L of water in VBT
     this.vbtCmd = 0;                         // -1 pump out .. +1 flood
     this.vbtValveOK = true; this.vbtPumpOK = true; this.vbtIsolated = false;
     this.trim = 0;                           // -1..1 (positive = bow down)
@@ -168,7 +168,7 @@ export class Submarine {
       t.power = t.pwr * Math.abs(s) ** 3 * (1 + t.jam * 2.5) + (Math.abs(s) > 0.01 ? 60 : 0);
       thrPower += t.power;
       // thermal: motor heat vs. sea cooling
-      t.temp += (t.power * 0.0009 - (t.temp - seaT) * 0.02) * dt;
+      t.temp += (t.power * 0.00008 - (t.temp - seaT) * 0.02) * dt;
       const ax = t.axis, p = t.pos;
       fBody.x += ax[0] * t.thrust; fBody.y += ax[1] * t.thrust; fBody.z += ax[2] * t.thrust;
       // torque = r x F
