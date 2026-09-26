@@ -1,2 +1,2 @@
 PBR textures in this folder are from ambientCG (https://ambientcg.com), licensed CC0 1.0 Universal.
-Rock030, Rock035, Ground054, Ground037, MetalPlates006, PaintedMetal009, DiamondPlate001, Leather026, Metal032, Rust004, MetalWalkway010, Metal049A (whitepaint), Fabric030 (fabric)
+Rock030, Rock035, Ground054, Ground037, MetalPlates006, PaintedMetal009, DiamondPlate001, Leather026, Metal032, Rust004, MetalWalkway010, Metal049A (whitepaint), Fabric030 (fabric), PaintedPlaster017 + SurfaceImperfections003/013 + Fingerprints002 + Smear002 (baked into wallpanel_*)
