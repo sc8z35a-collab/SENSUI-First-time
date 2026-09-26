@@ -40,7 +40,7 @@ export class Systems {
     this.cross = false; // cross-tie A<->B bus
     this.breakers = Object.fromEntries(BREAKERS.map((b) => [b.id, { ...b, closed: true, tripped: false, load: 0 }]));
     this.breakers.HEAT.closed = false;
-    this.lights = { main: 0.85, flood: 0.6, cabin: 0.7, extFault: 0 };
+    this.lights = { main: 0.85, flood: 0.6, cabin: 0.35, extFault: 0 }; // cabin dimmed for dive (night-vision friendly)
     this.loads = {};
     this.totalPower = 0;
     // --- life support (sphere ~ 5.6 m^3 free volume, 1 pilot)

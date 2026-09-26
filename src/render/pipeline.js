@@ -187,6 +187,18 @@ void main(){
   gl_FragColor = vec4(o / 16.0 + texture2D(tPrev, vUv).rgb, 1.0);
 }`;
 
+// Scene metering for auto exposure: 64x32 log-luminance with centre-weighting (the pilot looks
+// out through the main viewport; bright cabin walls at the edge must not dominate).
+const LUM_FRAG = /* glsl */ `
+varying vec2 vUv; uniform sampler2D tSrc;
+void main(){
+  vec3 c = texture2D(tSrc, vUv).rgb;
+  float L = dot(c, vec3(0.2126, 0.7152, 0.0722));
+  vec2 d = (vUv - vec2(0.5, 0.56)) * vec2(1.6, 1.0);
+  float w = exp(-dot(d, d) * 6.0);
+  gl_FragColor = vec4(log(max(L, 1e-4)) * w, w, 0.0, 1.0);
+}`;
+
 const FINAL_FRAG = /* glsl */ `
 varying vec2 vUv;
 uniform sampler2D tColor; uniform sampler2D tBloom;
@@ -242,7 +254,7 @@ export class Pipeline {
     this.fsScene.add(this.quad);
     this.fsCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     this.frame = 0;
-    this.params = { exposure: 1.0, bloom: 0.9, vignette: 0.55, ca: 0.012, grain: 0.035, flash: 0, flashColor: new THREE.Color(1, 1, 1), blackout: 0, redAlert: 0, fog: 0, smoke: 0, scatterBoost: 1, silt: 0 };
+    this.params = { autoExposure: true, exposure: 1.0, bloom: 0.9, vignette: 0.55, ca: 0.012, grain: 0.035, flash: 0, flashColor: new THREE.Color(1, 1, 1), blackout: 0, redAlert: 0, fog: 0, smoke: 0, scatterBoost: 1, silt: 0 };
 
     const rtOpts = { type: THREE.HalfFloatType, format: THREE.RGBAFormat, colorSpace: THREE.LinearSRGBColorSpace, depthBuffer: true };
     this.rtScene = new THREE.WebGLRenderTarget(4, 4, { ...rtOpts, samples: 4 });
@@ -254,6 +266,9 @@ export class Pipeline {
       this.bloomDown.push(new THREE.WebGLRenderTarget(4, 4, { type: THREE.HalfFloatType, depthBuffer: false }));
       this.bloomUp.push(new THREE.WebGLRenderTarget(4, 4, { type: THREE.HalfFloatType, depthBuffer: false }));
     }
+    this.rtLum = new THREE.WebGLRenderTarget(64, 32, { type: THREE.FloatType, depthBuffer: false, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+    this.lumBuf = new Float32Array(64 * 32 * 4);
+    this.avgLum = 0.18; this._lumFrame = 0;
     this.black = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1); this.black.needsUpdate = true;
 
     this.volMat = fsMat(VOL_FRAG, {
@@ -272,6 +287,7 @@ export class Pipeline {
     });
     this.downMat = fsMat(DOWN_FRAG, { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() }, uThreshold: { value: 1.2 }, uFirst: { value: 0 } });
     this.upMat = fsMat(UP_FRAG, { tSrc: { value: null }, tPrev: { value: null }, uTexel: { value: new THREE.Vector2() }, uRadius: { value: 1.0 } });
+    this.lumMat = fsMat(LUM_FRAG, { tSrc: { value: null } });
     this.finalMat = fsMat(FINAL_FRAG, {
       tColor: { value: null }, tBloom: { value: null }, uExposure: { value: 1 }, uBloom: { value: 0.8 }, uTime: { value: 0 },
       uRes: { value: new THREE.Vector2() }, uVignette: { value: 0.5 }, uCA: { value: 0.01 }, uGrain: { value: 0.03 },
@@ -381,6 +397,18 @@ export class Pipeline {
       this.upMat.uniforms.uTexel.value.set(1 / s.width, 1 / s.height);
       this._fs(this.upMat, this.bloomUp[i]);
       prev = this.bloomUp[i].texture;
+    }
+
+    // 4b. metering (every 4th frame; readback of 64x32 floats is cheap)
+    if (P.autoExposure && (this._lumFrame++ & 3) === 0) {
+      this.lumMat.uniforms.tSrc.value = this.rtVol.texture;
+      this._fs(this.lumMat, this.rtLum);
+      try {
+        this.renderer.readRenderTargetPixels(this.rtLum, 0, 0, 64, 32, this.lumBuf);
+        let sl = 0, sw = 0;
+        for (let i = 0; i < 64 * 32; i++) { sl += this.lumBuf[i * 4]; sw += this.lumBuf[i * 4 + 1]; }
+        if (sw > 0 && Number.isFinite(sl)) this.avgLum = Math.exp(sl / sw);
+      } catch (e) { /* readback unsupported: keep last value */ }
     }
 
     // 5. final

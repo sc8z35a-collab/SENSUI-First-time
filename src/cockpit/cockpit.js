@@ -62,7 +62,7 @@ export class Cockpit {
   async build() {
     const S = this.sphere;
     const [paint, brushed, leather, grate, floor, rust, hullM] = await Promise.all([
-      paintedMaterial({ color: 0xe6e4de, repeat: 5 }),
+      paintedMaterial({ color: 0xcfcbc1, repeat: 5, rough: [0.45, 0.62] }),
       pbrMaterial('brushed', { repeat: 2, metal: true, roughness: 1, color: 0xbfc4c8 }),
       pbrMaterial('leather', { repeat: 3, roughness: 1, color: 0x2a2c30 }),
       pbrMaterial('grate', { repeat: 4, metal: true, color: 0x8a8d90 }),

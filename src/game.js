@@ -543,12 +543,17 @@ export class Game {
     if (this.state === 'end' && sys.dead) this._endT = (this._endT || 0) + dt;
     P.blackout = Math.min(1, THREE.MathUtils.clamp((1 - sys.pilotHealth) * 1.1 - 0.35, 0, 1) + (this._endT ? this._endT * 0.5 : 0));
     P.ca = 0.012 + sys.hypoxia * 0.05 + this.shake * 0.02;
-    // eye dark adaptation: exposure creeps up in darkness
-    const dark = extLight < 0.2 && sub.depth > 300 ? 1.6 : 1.0;
-    P.exposure += (dark - P.exposure) * Math.min(1, dt * 0.2);
+    // eye adaptation: centre-weighted log-average luminance -> exposure for a mid-grey key.
+    // Asymmetric like the human eye: light adaptation ~1 s, dark adaptation ~8 s; limited range
+    // so the deep ocean stays genuinely dark (you cannot see without the lamps).
+    const key = 0.16, target = THREE.MathUtils.clamp(key / Math.max(1e-3, this.pipe.avgLum), 0.45, 2.6);
+    const rate = target < P.exposure ? 1.2 : 0.14;
+    P.exposure += (target - P.exposure) * (1 - Math.exp(-dt * rate));
+    if (!Number.isFinite(P.exposure)) P.exposure = 1;
     P.vignette = 0.55 + sys.hypoxia * 0.4;
     P.grain = 0.035 + (sub.depth > 1000 ? 0.02 : 0);
-    this.cockpit.scene.environmentIntensity = 0.12 + (sys.powered('CABIN') ? sys.lights.cabin * 0.3 : 0.02);
+    // image-based fill ~ indirect bounce of the cabin lamps off the (light) sphere walls
+    this.cockpit.scene.environmentIntensity = 0.025 + (sys.powered('CABIN') ? sys.lights.cabin * 0.12 : 0);
   }
 
   _render(t) { this.pipe.render(this.scene, this.cockpit.scene, this.camera, t); }
