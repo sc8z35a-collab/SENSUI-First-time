@@ -97,15 +97,15 @@ export class Cockpit {
     pad.material.side = THREE.BackSide; pad.receiveShadow = true;
     S.add(pad);
     // interior lining panels, cable trays, handles, placards, pilot kit
-    const panelMat = paint.clone(); panelMat.color.set(0xd4d0c6);
+    const panelMat = paint.clone(); panelMat.color.set(0xc9c5bb);
     const panelDark = paint.clone(); panelDark.color.set(0x5d6166);
     this.outfit = buildOutfit(S, {
-      R: SPHERE_R, ports: VIEWPORTS, floorY: -0.62, dark: new THREE.MeshStandardMaterial({ color: 0x15171a, roughness: 0.7, metalness: 0.4 }),
+      R: SPHERE_R, ports: VIEWPORTS, floorY: -0.62, dark: new THREE.MeshStandardMaterial({ color: 0x3a3e43, roughness: 0.8, metalness: 0.3 }),
       mats: {
         panel: panelMat, panelDark,
         steel: new THREE.MeshStandardMaterial({ color: 0xb8bcc0, metalness: 1, roughness: 0.32 }),
         anodised: new THREE.MeshStandardMaterial({ color: 0x1b1d21, metalness: 0.6, roughness: 0.38 }),
-        cable, cableOr,
+        cable, cableOr, titanium,
         strap: new THREE.MeshStandardMaterial({ color: 0x202226, roughness: 0.95 }),
         handle: new THREE.MeshStandardMaterial({ color: 0xf2b400, roughness: 0.4, metalness: 0.1 }),
         firstAid: new THREE.MeshStandardMaterial({ color: 0xe8e6e0, roughness: 0.6 }),

@@ -28,18 +28,18 @@ function portClearance(d, ports) {
 
 // One lining panel: a (lat0..lat1) x (lon0..lon1) patch at radius r, pushed inward at the centre
 // ("pillow") and bevelled towards the edges. Returns null if it would intersect a viewport.
-function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.006, bevel = 0.012, pillow = 0.006, seg = 10, ports, portMargin = 0.07 }) {
+function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.004, bevel = 0.012, pillow = 0.006, seg = 12, ports, portMargin = 0.035 }) {
   const dl = gap / r;
   lat0 += dl; lat1 -= dl; lon0 += dl / Math.max(0.2, Math.cos((lat0 + lat1) / 2)); lon1 -= dl / Math.max(0.2, Math.cos((lat0 + lat1) / 2));
   const nu = seg, nv = seg;
   const pos = [], uv = [], idx = [];
-  let skip = 0;
+  const clear = [];
   for (let j = 0; j <= nv; j++) {
     for (let i = 0; i <= nu; i++) {
       const u = i / nu, v = j / nv;
       const lat = lat0 + (lat1 - lat0) * v, lon = lon0 + (lon1 - lon0) * u;
       const d = dirFrom(lat, lon);
-      if (portClearance(d, ports) < portMargin) skip++;
+      clear.push(portClearance(d, ports) >= portMargin);
       // edge distance in [0..0.5]
       const e = Math.min(u, 1 - u, v, 1 - v);
       const bev = Math.min(1, e * nu / 1.2); // 0 at edge -> 1 inside first segment
@@ -49,11 +49,13 @@ function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.006, bevel = 0.012, 
       uv.push(u * (lon1 - lon0) * r * 2.2, v * (lat1 - lat0) * r * 2.2);
     }
   }
-  if (skip > 0) return null;
+  // drop only the triangles that intrude into a viewport cone (the trim ring hides the jagged edge)
   for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) {
     const a = j * (nu + 1) + i, b = a + 1, c = a + nu + 1, d = c + 1;
-    idx.push(a, b, c, b, d, c); // wound for viewing from inside (BackSide not needed)
+    if (clear[a] && clear[b] && clear[c]) idx.push(a, b, c);
+    if (clear[b] && clear[d] && clear[c]) idx.push(b, d, c);
   }
+  if (!idx.length) return null;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
@@ -80,17 +82,10 @@ export function buildOutfit(S, { R, ports, mats, dark, floorY }) {
       const off = (bands.findIndex((b) => b[0] === la0) % 2) * 0.5;
       const lo0 = ((k + off) / n) * Math.PI * 2 - Math.PI, lo1 = ((k + 1 + off) / n) * Math.PI * 2 - Math.PI;
       const g = panelGeometry(la0, la1, lo0, lo1, rLining, { ports });
-      if (!g) {
-        // subdivide around ports so the lining hugs them instead of leaving a big hole
-        for (const [a, b, c, d] of [[la0, (la0 + la1) / 2, lo0, (lo0 + lo1) / 2], [la0, (la0 + la1) / 2, (lo0 + lo1) / 2, lo1], [(la0 + la1) / 2, la1, lo0, (lo0 + lo1) / 2], [(la0 + la1) / 2, la1, (lo0 + lo1) / 2, lo1]]) {
-          const g2 = panelGeometry(a, b, c, d, rLining, { ports, seg: 6, portMargin: 0.05 });
-          if (g2) { panelGeos.push(g2); addScrews(screws, a, b, c, d, rLining - 0.004); }
-        }
-        continue;
-      }
+      if (!g) continue;
       // a few panels are the darker "service access" type
       (rnd() < 0.12 ? accentGeos : panelGeos).push(g);
-      addScrews(screws, la0, la1, lo0, lo1, rLining - 0.004);
+      addScrews(screws, la0, la1, lo0, lo1, rLining - 0.004, ports);
     }
   }
   const lining = new THREE.Mesh(mergeGeometries(panelGeos), mats.panel);
@@ -98,7 +93,8 @@ export function buildOutfit(S, { R, ports, mats, dark, floorY }) {
   S.add(lining);
   if (accentGeos.length) { const acc = new THREE.Mesh(mergeGeometries(accentGeos), mats.panelDark); acc.receiveShadow = true; S.add(acc); }
   // stand-off frame visible in the seams (slightly larger, dark)
-  const backing = new THREE.Mesh(new THREE.SphereGeometry(R - 0.03, 96, 64), dark);
+  // theta measured from the top: lined band spans lat -0.62..1.12 -> theta 0.45..2.19
+  const backing = new THREE.Mesh(new THREE.SphereGeometry(R - 0.03, 96, 48, 0, Math.PI * 2, Math.PI / 2 - 1.12, 1.74), dark);
   backing.material = dark.clone(); backing.material.side = THREE.BackSide;
   backing.material.onBeforeCompile = portDiscard(ports, 0.0);
   backing.material.customProgramCacheKey = () => 'backing-vp';
@@ -113,12 +109,21 @@ export function buildOutfit(S, { R, ports, mats, dark, floorY }) {
 
   // trim rings around the side & lower ports (black anodised, like the real bezels)
   for (const p of ports) {
-    if (p.main) continue;
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(Math.sin(p.half + 0.035) * rLining, 0.012, 10, 64), mats.anodised);
-    ring.position.copy(p.dir).multiplyScalar(Math.cos(p.half + 0.035) * rLining);
+    const a = p.half + 0.03;
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(Math.sin(a) * rLining, p.main ? 0.02 : 0.014, 12, 96), mats.anodised);
+    ring.scale.z = 0.6;
+    ring.position.copy(p.dir).multiplyScalar(Math.cos(a) * (rLining - 0.004));
     ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), p.dir);
     S.add(ring);
   }
+
+  // hatch collar (bare machined titanium above the lining, as on real spheres)
+  const collarLat = 1.12;
+  const collar = new THREE.Mesh(new THREE.SphereGeometry(R - 0.02, 64, 8, 0, Math.PI * 2, 0, Math.PI / 2 - collarLat + 0.01), mats.titanium);
+  collar.material = mats.titanium.clone(); collar.material.side = THREE.BackSide;
+  S.add(collar);
+  const collarEdge = new THREE.Mesh(new THREE.TorusGeometry(Math.cos(collarLat) * rLining, 0.014, 10, 96), mats.anodised);
+  collarEdge.rotation.x = Math.PI / 2; collarEdge.position.y = Math.sin(collarLat) * rLining; S.add(collarEdge);
 
   // ------------------------------------------------------------------ cable trays with harnesses
   // Two horizontal trays at shoulder height running around the sphere (behind the pilot), plus
@@ -214,9 +219,12 @@ function placeOnWall(obj, d, r) {
   obj.lookAt(0, obj.position.y, 0);
 }
 
-function addScrews(list, la0, la1, lo0, lo1, r) {
+function addScrews(list, la0, la1, lo0, lo1, r, ports) {
   const mlat = (la1 - la0) * 0.12, mlon = (lo1 - lo0) * 0.1;
-  for (const la of [la0 + mlat, la1 - mlat]) for (const lo of [lo0 + mlon, lo1 - mlon]) list.push(dirFrom(la, lo).multiplyScalar(r));
+  for (const la of [la0 + mlat, la1 - mlat]) for (const lo of [lo0 + mlon, lo1 - mlon]) {
+    const d = dirFrom(la, lo);
+    if (portClearance(d, ports) > 0.06) list.push(d.multiplyScalar(r));
+  }
 }
 
 // discard fragments inside viewport cones (for shells that must not cover the ports)
