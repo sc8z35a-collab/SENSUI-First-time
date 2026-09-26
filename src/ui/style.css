@@ -39,7 +39,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;touch-
 .hud-layer{position:absolute;inset:0;pointer-events:none;z-index:2}
 .hud-top{position:absolute;top:calc(var(--st) + 4px);left:calc(var(--sl) + 6px);right:calc(var(--sr) + 6px);height:var(--top);display:flex;gap:4px;align-items:stretch;pointer-events:none}
 .ht-block{background:var(--glass);border:1px solid var(--line);border-radius:7px;padding:2px 7px 3px;display:flex;flex-direction:column;justify-content:center;min-width:0;flex:0 1 auto;position:relative;overflow:hidden}
-.ht-block .k{font-size:9px;letter-spacing:.1em;color:rgba(150,210,240,.75);white-space:nowrap}
+.ht-block .k{font-size:9px;letter-spacing:.08em;padding-right:14px;color:rgba(150,210,240,.75);white-space:nowrap}
 .ht-block .v{font-family:"Share Tech Mono","DejaVu Sans Mono",monospace;font-size:21px;line-height:1;color:#effaff;text-shadow:0 0 10px rgba(80,200,255,.5);white-space:nowrap}
 .ht-block .v.s{font-size:16px}
 .ht-block .u{position:absolute;right:5px;top:2px;font-size:9px;color:rgba(150,210,240,.6)}
