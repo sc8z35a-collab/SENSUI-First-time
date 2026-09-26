@@ -65,6 +65,7 @@ export class MarineSnow {
     this.points.frustumCulled = false;
     scene.add(this.points);
   }
+  setDensityScale(k) { this.densityScale = k; }
   update(t, camPos, spots, amb, depth, silt) {
     const u = this.mat.uniforms;
     u.uCam.value.copy(camPos); u.uT.value = t;
@@ -72,14 +73,14 @@ export class MarineSnow {
       const s = spots[i];
       if (!s || !s.visible) { u.uSpotI.value[i] = 0; continue; }
       s.getWorldPosition(u.uSpotPos.value[i]);
-      const tp = new THREE.Vector3(); s.target.getWorldPosition(tp);
+      const tp = (this._tp ||= new THREE.Vector3()); s.target.getWorldPosition(tp);
       u.uSpotDir.value[i].copy(tp).sub(u.uSpotPos.value[i]).normalize();
       u.uSpotI.value[i] = s.intensity * 0.0012;
       u.uSpotCos.value = Math.cos(s.angle);
     }
     u.uAmb.value.set(amb.r, amb.g, amb.b);
     // snow density peaks in the mesopelagic, never zero
-    u.uDensity.value = THREE.MathUtils.clamp(0.25 + Math.min(1, depth / 250) * 0.75, 0, 1);
+    u.uDensity.value = THREE.MathUtils.clamp(0.25 + Math.min(1, depth / 250) * 0.75, 0, 1) * (this.densityScale ?? 1);
     u.uSilt.value = silt;
   }
 }

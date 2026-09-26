@@ -106,7 +106,7 @@ void main(){
   // --- sun shafts: modulated in-scatter by moving pattern, strong in first ~120 m
   float jitter = hash12(gl_FragCoord.xy + fract(uFrame * 0.618) * 100.0);
   if (uCamPos.y > -220.0) {
-    const int SS = 16;
+    const int SS = SHAFT_STEPS;
     float maxD = min(dist, 90.0);
     float stepL = maxD / float(SS);
     vec3 acc = vec3(0.0);
@@ -130,7 +130,7 @@ void main(){
   // forward peak, ~2.5 % backscatter): looking down the beam gives weak haze, looking across it or
   // towards a lamp gives the bright forward-scatter cone. The ray starts at the viewport glass.
   if (uSpotCount > 0) {
-    const int STEPS = 48;
+    const int STEPS = VOL_STEPS;
     float t0 = uRayStart;
     float maxD = max(min(dist, 80.0) - t0, 0.0);
     float stepL = maxD / float(STEPS);
@@ -284,7 +284,8 @@ export class Pipeline {
       uSpotCos: { value: new Array(MAX_SPOTS).fill(0.9) },
       uSpotPen: { value: new Array(MAX_SPOTS).fill(0.05) },
       uScatterBoost: { value: 1 }, uSilt: { value: 0 }, uRayStart: { value: 1.0 }, uScatB: { value: 0.035 },
-    });
+    }, { VOL_STEPS: 48, SHAFT_STEPS: 16 });
+    this.bloomLevels = 6;
     this.downMat = fsMat(DOWN_FRAG, { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() }, uThreshold: { value: 1.2 }, uFirst: { value: 0 } });
     this.upMat = fsMat(UP_FRAG, { tSrc: { value: null }, tPrev: { value: null }, uTexel: { value: new THREE.Vector2() }, uRadius: { value: 1.0 } });
     this.lumMat = fsMat(LUM_FRAG, { tSrc: { value: null } });
@@ -297,8 +298,19 @@ export class Pipeline {
     this.spots = [];
   }
 
+  // graphics preset: raymarch step counts (shader defines), bloom depth, MSAA
+  setQuality(Q) {
+    const d = this.volMat.defines;
+    if (d.VOL_STEPS !== Q.volSteps || d.SHAFT_STEPS !== Q.shafts) { d.VOL_STEPS = Q.volSteps; d.SHAFT_STEPS = Q.shafts; this.volMat.needsUpdate = true; }
+    this.bloomLevels = Q.bloom;
+    if (this.rtScene.samples !== Q.msaa) {
+      for (const rt of [this.rtScene, this.rtVol]) { rt.samples = Q.msaa; rt.dispose(); }
+    }
+  }
+
   setSize(w, h, pr) {
-    const W = Math.floor(w * pr), H = Math.floor(h * pr);
+    const W = Math.max(1, Math.floor(w * pr)), H = Math.max(1, Math.floor(h * pr));
+    if (W === this.W && H === this.H) return;
     this.W = W; this.H = H;
     this.rtScene.setSize(W, H);
     this.rtScene.depthTexture.image.width = W; this.rtScene.depthTexture.image.height = H;
@@ -359,7 +371,7 @@ export class Pipeline {
       if (n >= MAX_SPOTS) break;
       if (!s.visible || s.intensity <= 0) continue;
       s.getWorldPosition(u.uSpotPos.value[n]);
-      const tp = new THREE.Vector3(); s.target.getWorldPosition(tp);
+      const tp = (this._tp ||= new THREE.Vector3()); s.target.getWorldPosition(tp);
       u.uSpotDir.value[n].copy(tp).sub(u.uSpotPos.value[n]).normalize();
       u.uSpotColor.value[n].set(s.color.r, s.color.g, s.color.b).multiplyScalar(s.intensity); // candela
       u.uSpotCos.value[n] = Math.cos(s.angle);
@@ -381,7 +393,8 @@ export class Pipeline {
     // 4. bloom
     let src = this.rtVol.texture;
     let sw = this.W, sh = this.H;
-    for (let i = 0; i < this.bloomDown.length; i++) {
+    const NB = Math.min(this.bloomLevels, this.bloomDown.length);
+    for (let i = 0; i < NB; i++) {
       this.downMat.uniforms.tSrc.value = src;
       this.downMat.uniforms.uTexel.value.set(1 / sw, 1 / sh);
       this.downMat.uniforms.uFirst.value = i === 0 ? 1 : 0;
@@ -390,10 +403,10 @@ export class Pipeline {
       sw = this.bloomDown[i].width; sh = this.bloomDown[i].height;
     }
     let prev = this.black;
-    for (let i = this.bloomDown.length - 1; i >= 0; i--) {
-      const s = i === this.bloomDown.length - 1 ? this.bloomDown[i] : this.bloomUp[i + 1];
+    for (let i = NB - 1; i >= 0; i--) {
+      const s = i === NB - 1 ? this.bloomDown[i] : this.bloomUp[i + 1];
       this.upMat.uniforms.tSrc.value = s.texture;
-      this.upMat.uniforms.tPrev.value = i === this.bloomDown.length - 1 ? this.black : this.bloomDown[i].texture;
+      this.upMat.uniforms.tPrev.value = i === NB - 1 ? this.black : this.bloomDown[i].texture;
       this.upMat.uniforms.uTexel.value.set(1 / s.width, 1 / s.height);
       this._fs(this.upMat, this.bloomUp[i]);
       prev = this.bloomUp[i].texture;

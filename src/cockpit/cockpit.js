@@ -540,6 +540,7 @@ export class Cockpit {
     this.sphere.add(this.particles);
     this.pN = N; this.pNext = 0;
   }
+  setShadows(on) { if (this.keyLight) this.keyLight.castShadow = !!on; }
   emit(kind, pos, vel, life, size) {
     const i = this.pNext; this.pNext = (this.pNext + 1) % this.pN;
     this.pPos[i * 3] = pos.x; this.pPos[i * 3 + 1] = pos.y; this.pPos[i * 3 + 2] = pos.z;
