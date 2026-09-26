@@ -10,6 +10,7 @@ INIT = """
 })();
 """
 async def main():
+    os.makedirs('shots', exist_ok=True)
     url, wait, w, h = sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
     jobs = sys.argv[5:]
     async with async_playwright() as p:
