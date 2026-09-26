@@ -8,3 +8,6 @@ shot*.png
 shot*.jpg
 tools/agents/out/
 .cache_install.log
+/*.jpg
+/*.png
+/shots/
