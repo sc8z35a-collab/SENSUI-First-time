@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { pbrMaterial, tex } from '../render/textures.js';
+import { pbrMaterial, paintedMaterial, tex } from '../render/textures.js';
 import { canvasTexture, placard, FONT, MONO } from './canvasTex.js';
 import { BREAKERS } from '../sim/systems.js';
 
@@ -62,7 +62,7 @@ export class Cockpit {
   async build() {
     const S = this.sphere;
     const [paint, brushed, leather, grate, floor, rust, hullM] = await Promise.all([
-      pbrMaterial('paint', { repeat: 3, ao: true, metal: true, roughness: 1, color: 0xe8e6e0 }),
+      paintedMaterial({ color: 0xe6e4de, repeat: 5 }),
       pbrMaterial('brushed', { repeat: 2, metal: true, roughness: 1, color: 0xbfc4c8 }),
       pbrMaterial('leather', { repeat: 3, roughness: 1, color: 0x2a2c30 }),
       pbrMaterial('grate', { repeat: 4, metal: true, color: 0x8a8d90 }),

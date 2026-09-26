@@ -6,7 +6,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { applyWater } from '../render/water.js';
-import { pbrMaterial } from '../render/textures.js';
+import { pbrMaterial, paintedMaterial } from '../render/textures.js';
 
 const W = (m, c = false) => applyWater(m, { caustics: c });
 
@@ -27,11 +27,11 @@ export class Exterior {
   async build() {
     const R = this.root;
     const [paint, hull, brushed] = await Promise.all([
-      pbrMaterial('paint', { repeat: 2, metal: true, ao: true, color: 0xf0f0ec }),
+      paintedMaterial({ color: 0xf0efe8, repeat: 3, rough: [0.45, 0.7] }),
       pbrMaterial('hull', { repeat: 2, metal: true, color: 0x7d858c }),
       pbrMaterial('brushed', { repeat: 2, metal: true, color: 0xa9aeb2 }),
     ]);
-    const foam = W(paint.clone(), true); foam.color.set(0xf3f1ea); foam.roughness = 0.9;
+    const foam = W(paint.clone(), true); foam.color.set(0xf3f1ea);
     const foamOrange = W(paint.clone(), true); foamOrange.color.set(0xff6a12);
     const frame = W(hull.clone(), true); frame.color.set(0x3b4046); frame.metalness = 0.8;
     const ti = W(brushed.clone(), true); ti.color.set(0xa8a49a);
