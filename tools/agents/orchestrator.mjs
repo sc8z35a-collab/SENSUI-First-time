@@ -55,8 +55,11 @@ async function chat(cfg, model, messages, { timeoutMs = 600000 } = {}) {
   } finally { clearTimeout(to); }
 }
 
+// every model the proxy offers — used as fall-backs if a role's primary model is unavailable
+const FALLBACK = ['gpt-5.2', 'gpt-5.2-codex', 'gpt-5.3-codex', 'gpt-5.1', 'gpt-5', 'gpt-5-codex', 'gpt-5-mini'];
+
 export async function preflight(cfg) {
-  const models = [...new Set(ROLES.map((r) => r.model))];
+  const models = [...new Set([...ROLES.map((r) => r.model), ...FALLBACK])];
   const res = await Promise.allSettled(models.map((m) => chat(cfg, m, [{ role: 'user', content: 'Reply with the single word READY.' }], { timeoutMs: 60000 })));
   const report = models.map((m, i) => ({ model: m, ok: res[i].status === 'fulfilled' && /READY/i.test(res[i].value.content), err: res[i].reason?.message }));
   return report;
@@ -77,7 +80,15 @@ If nothing should change, output an empty diff block.`;
 async function runAgent(cfg, role) {
   const t0 = Date.now();
   const user = `ROLE: ${role.name}\nBRIEF: ${role.brief}\nTASK: ${task}\n\n${readFiles(role.files)}`;
-  const { content, usage } = await chat(cfg, role.model, [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }]);
+  let content, usage, lastErr;
+  for (const model of [role.model, ...(role.healthy || [])].filter((m, i, a) => a.indexOf(m) === i).slice(0, 3)) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { ({ content, usage } = await chat(cfg, model, [{ role: 'system', content: SYSTEM }, { role: 'user', content: user }])); lastErr = null; break; }
+      catch (e) { lastErr = e; if (e.blocked) break; await new Promise((r) => setTimeout(r, 3000 * (attempt + 1))); }
+    }
+    if (!lastErr) break;
+  }
+  if (lastErr) throw lastErr;
   const diff = content.match(/```diff\n([\s\S]*?)```/)?.[1] ?? '';
   fs.writeFileSync(path.join(OUT, `${role.id}.md`), content);
   if (diff.trim()) fs.writeFileSync(path.join(OUT, `${role.id}.patch`), diff);
@@ -93,7 +104,14 @@ async function main() {
   const pf = await preflight(cfg);
   for (const p of pf) console.log(`  ${p.ok ? 'OK ' : 'NG '} ${p.model}${p.err ? '  ' + p.err : ''}`);
   fs.writeFileSync(path.join(OUT, 'preflight.json'), JSON.stringify({ at: new Date().toISOString(), pf }, null, 2));
-  if (!pf.every((p) => p.ok)) { console.error('[pipeline] LLM API unavailable — agents NOT started.'); process.exit(2); }
+  const healthy = pf.filter((p) => p.ok).map((p) => p.model);
+  if (!healthy.length) {
+    const why = pf.find((p) => p.err)?.err || 'unknown';
+    console.error(`[pipeline] LLM API unavailable — agents NOT started. (${why})`);
+    fs.writeFileSync(path.join(OUT, 'STATUS.md'), `# Agent pipeline status\n\n- ${new Date().toISOString()}: BLOCKED — ${why}\n`);
+    process.exit(2);
+  }
+  for (const r of ROLES) r.healthy = healthy;
   if (flag('--check')) return;
 
   console.log(`[pipeline] launching ${ROLES.length} agents in parallel`);
