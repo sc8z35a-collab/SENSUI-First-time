@@ -147,7 +147,7 @@ export class Game {
     if (P.has('yaw')) this.sub.yaw = +P.get('yaw');
     this.sub._updateQuat();
     // settle VBT to neutral at the start depth
-    if (poi || P.has('depth')) this._neutralise();
+    if (poi || P.has('depth')) { this._neutralise(); this._devStart = true; }
   }
   _neutralise() {
     const s = this.sub;
@@ -392,7 +392,8 @@ export class Game {
       const cap = 60 * 16;
       while (this._acc >= H && n < cap) { this._step(H); this._acc -= H; n++; if (this.state !== 'play') break; }
       if (n >= cap) this._acc = 0;
-    } else if (this.state === 'title') {
+    } else if (this.state === 'title' && !this._devStart) {
+      // idle at the surface beside the mothership: gentle swell
       this.sub.pos.y = -1.5 + Math.sin(t * 0.6) * 0.1;
       this.sub.roll = Math.sin(t * 0.5) * 0.02; this.sub.pitch = Math.sin(t * 0.37) * 0.015;
       this.sub.yaw += dt * 0.004;

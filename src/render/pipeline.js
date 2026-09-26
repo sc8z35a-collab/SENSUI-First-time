@@ -42,6 +42,8 @@ uniform float uSpotCos[${MAX_SPOTS}];
 uniform float uSpotPen[${MAX_SPOTS}];
 uniform float uScatterBoost;
 uniform float uSilt;
+uniform float uRayStart;
+uniform float uScatB;
 
 float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 float hgPhase(float mu, float g){ float g2 = g*g; return (1.0 - g2) / (4.0*3.14159*pow(1.0 + g2 - 2.0*g*mu, 1.5)); }
@@ -122,14 +124,19 @@ void main(){
     col += acc * uScatTint * (0.02 + 0.5 * hgPhase(mu, 0.7)) * 0.35 * smoothstep(-220.0, -60.0, uCamPos.y);
   }
 
-  // --- headlight volumetrics
+  // --- headlight volumetrics (single scattering, physically based)
+  // L_in = ∫ b · p(θ) · I/l² · e^{-c(l + t)} dt, θ = angle between light propagation (lamp → sample)
+  // and the direction to the eye (-rd). Two-term HG phase fitted to Petzold's ocean data (strong
+  // forward peak, ~2.5 % backscatter): looking down the beam gives weak haze, looking across it or
+  // towards a lamp gives the bright forward-scatter cone. The ray starts at the viewport glass.
   if (uSpotCount > 0) {
-    const int STEPS = 40;
-    float maxD = min(dist, 70.0);
+    const int STEPS = 48;
+    float t0 = uRayStart;
+    float maxD = max(min(dist, 80.0) - t0, 0.0);
     float stepL = maxD / float(STEPS);
     vec3 acc = vec3(0.0);
     for (int i = 0; i < STEPS; i++) {
-      float t = (float(i) + jitter) * stepL;
+      float t = t0 + (float(i) + jitter) * stepL;
       vec3 p = uCamPos + rd * t;
       vec3 Tc = exp(-sigma * t);
       for (int s = 0; s < ${MAX_SPOTS}; s++) {
@@ -137,15 +144,17 @@ void main(){
         vec3 L = p - uSpotPos[s];
         float l2 = dot(L, L);
         float l = sqrt(l2);
-        vec3 Ld = L / l;
+        vec3 Ld = L / max(l, 1e-4);
         float c = dot(Ld, uSpotDir[s]);
         float cone = smoothstep(uSpotCos[s], uSpotCos[s] + uSpotPen[s], c);
         if (cone <= 0.0) continue;
-        float ph = hgPhase(dot(-Ld, -rd), 0.82) * 0.85 + 0.03;
-        acc += uSpotColor[s] * cone * ph * Tc * exp(-sigma * l) / (l2 + 0.6) * stepL;
+        float mu = dot(Ld, -rd);
+        float ph = 0.975 * hgPhase(mu, 0.9) + 0.025 * hgPhase(mu, -0.35);
+        acc += uSpotColor[s] * cone * ph * Tc * exp(-sigma * l) / (l2 + 0.04) * stepL;
       }
     }
-    col += acc * uScatTint * 2.2 * uScatterBoost * (1.0 + uSilt * 5.0);
+    // b = scattering coefficient (1/m): clear ocean ~0.03, rises with silt / turbidity
+    col += acc * uScatB * (1.0 + uSilt * 12.0) * uScatterBoost * vec3(0.92, 0.97, 1.0);
   }
   gl_FragColor = vec4(col, 1.0);
 }`;
@@ -259,7 +268,7 @@ export class Pipeline {
       uSpotColor: { value: Array.from({ length: MAX_SPOTS }, () => new THREE.Vector3()) },
       uSpotCos: { value: new Array(MAX_SPOTS).fill(0.9) },
       uSpotPen: { value: new Array(MAX_SPOTS).fill(0.05) },
-      uScatterBoost: { value: 1 }, uSilt: { value: 0 },
+      uScatterBoost: { value: 1 }, uSilt: { value: 0 }, uRayStart: { value: 1.0 }, uScatB: { value: 0.035 },
     });
     this.downMat = fsMat(DOWN_FRAG, { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() }, uThreshold: { value: 1.2 }, uFirst: { value: 0 } });
     this.upMat = fsMat(UP_FRAG, { tSrc: { value: null }, tPrev: { value: null }, uTexel: { value: new THREE.Vector2() }, uRadius: { value: 1.0 } });
@@ -286,6 +295,18 @@ export class Pipeline {
     }
     this.volMat.uniforms.uRes.value.set(W, H);
     this.finalMat.uniforms.uRes.value.set(W, H);
+  }
+
+  // dev: average linear RGB of a render target region (tiny half-float readback)
+  probe(which = 'vol', x = 0.5, y = 0.5, size = 8) {
+    const rt = which === 'scene' ? this.rtScene : this.rtVol;
+    const w = size, h = size, buf = new Uint16Array(w * h * 4);
+    const px = Math.floor(rt.width * x - w / 2), py = Math.floor(rt.height * y - h / 2);
+    try { this.renderer.readRenderTargetPixels(rt, px, py, w, h, buf); } catch (e) { return 'err ' + e.message; }
+    const f = (u) => THREE.DataUtils.fromHalfFloat(u);
+    let r = 0, g = 0, b = 0;
+    for (let i = 0; i < w * h; i++) { r += f(buf[i * 4]); g += f(buf[i * 4 + 1]); b += f(buf[i * 4 + 2]); }
+    const n = w * h; return [r / n, g / n, b / n].map((v) => +v.toFixed(3));
   }
 
   _fs(mat, target) {
@@ -315,6 +336,8 @@ export class Pipeline {
     u.uFrame.value = this.frame;
     u.uScatterBoost.value = P.scatterBoost;
     u.uSilt.value = P.silt;
+    u.uRayStart.value = P.rayStart ?? 1.0;
+    u.uScatB.value = P.scatB ?? 0.035;
     let n = 0;
     for (const s of this.spots) {
       if (n >= MAX_SPOTS) break;
@@ -322,7 +345,7 @@ export class Pipeline {
       s.getWorldPosition(u.uSpotPos.value[n]);
       const tp = new THREE.Vector3(); s.target.getWorldPosition(tp);
       u.uSpotDir.value[n].copy(tp).sub(u.uSpotPos.value[n]).normalize();
-      u.uSpotColor.value[n].set(s.color.r, s.color.g, s.color.b).multiplyScalar(s.intensity * 0.0025);
+      u.uSpotColor.value[n].set(s.color.r, s.color.g, s.color.b).multiplyScalar(s.intensity); // candela
       u.uSpotCos.value[n] = Math.cos(s.angle);
       u.uSpotPen.value[n] = (1 - Math.cos(s.angle)) * s.penumbra + 0.001;
       n++;
