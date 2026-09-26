@@ -581,11 +581,12 @@ export class Cockpit {
       const p = sys.pen[id];
       if (p.leakRate <= 0.0005) continue;
       const lp = this.leakPoints[id];
+      if (!lp) continue;
       const rate = Math.min(60, 4 + p.leakRate * 300);
       const nEmit = Math.floor(rate * dt + Math.random());
       const spd = Math.min(12, 1 + Math.sqrt(p.leakRate) * 8);
       for (let k = 0; k < nEmit; k++) {
-        tmpV.copy(lp.dir).multiplyScalar(spd * (0.6 + Math.random() * 0.6)).add(new THREE.Vector3((Math.random() - 0.5), (Math.random() - 0.5), (Math.random() - 0.5)).multiplyScalar(spd * 0.25));
+        tmpV.copy(lp.dir).multiplyScalar(spd * (0.6 + Math.random() * 0.6)); tmpV.x += (Math.random() - 0.5) * spd * 0.25; tmpV.y += (Math.random() - 0.5) * spd * 0.25; tmpV.z += (Math.random() - 0.5) * spd * 0.25;
         this.emit(0, lp.pos, tmpV, 0.6 + Math.random() * 0.4, 10 + Math.random() * 18);
       }
     }
@@ -606,12 +607,12 @@ export class Cockpit {
       if (r2 > (SPHERE_R - 0.04) ** 2 && k !== 2) { this.pLife[i] = k === 0 ? Math.min(this.pLife[i], 0.05) : 0; this.pVel[j] *= -0.2; this.pVel[j + 1] *= -0.2; this.pVel[j + 2] *= -0.2; }
     }
     const g = this.particles.geometry;
-    g.attributes.position.needsUpdate = true; g.attributes.life.needsUpdate = true; g.attributes.kind.needsUpdate = true; g.attributes.size.needsUpdate = true;
+    g.attributes.position.needsUpdate = true; // (cheap: small pool) g.attributes.life.needsUpdate = true; g.attributes.kind.needsUpdate = true; g.attributes.size.needsUpdate = true;
 
     // glass condensation + wet rivulets near leaking viewport
     for (const m of this.glass) {
       m.userData.cond.value = sys.condensation;
-      m.userData.wet.value = sys.pen.VP.leakRate > 0 ? 1 : 0;
+      m.userData.wet.value = sys.pen.VP?.leakRate > 0 ? 1 : 0;
       if (m.userData.shader) m.userData.shader.uniforms.uT.value = t;
     }
 

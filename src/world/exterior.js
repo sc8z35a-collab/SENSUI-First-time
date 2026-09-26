@@ -277,7 +277,7 @@ export class Exterior {
       d.v.y = Math.max(-2.2, d.v.y - dt * 1.5);
       d.m.position.addScaledVector(d.v, dt);
       d.m.rotation.x += d.w.x * dt; d.m.rotation.y += d.w.y * dt; d.m.rotation.z += d.w.z * dt;
-      if (d.t > 40) { this.scene.remove(d.m); this.dropping.splice(i, 1); }
+      if (d.t > 40 || !Number.isFinite(d.m.position.y)) { this.scene.remove(d.m); this.dropping.splice(i, 1); }
     }
     return extLight;
   }
