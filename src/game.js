@@ -16,7 +16,7 @@ import { MFDRenderer } from './cockpit/mfd.js';
 import { Exterior } from './world/exterior.js';
 import { MarineSnow, Bubbles, Life, SPECIES } from './world/life.js';
 import { Props, buildMothership } from './world/props.js';
-import { POIS, groundHeight } from './world/density.js';
+import { POIS, groundHeight, trenchCenterX } from './world/density.js';
 import { AudioEngine } from './audio/audio.js';
 import { Controls } from './ui/controls.js';
 import { HUD } from './ui/hud.js';
@@ -138,11 +138,20 @@ export class Game {
       this.sub.yaw = a; // face the POI
       this.sub.vbt = 150;
     } else if (P.has('depth')) {
-      const d = +P.get('depth');
-      this.sub.pos.set(+(P.get('x') ?? this.sub.pos.x), -d, +(P.get('z') ?? this.sub.pos.z));
+      // place the boat in open water at the requested depth: walk from the shelf towards the
+      // trench axis until the seabed is at least `alt` metres below (default 40 m)
+      const d = +P.get('depth'), alt = +(P.get('alt') ?? 40);
+      const z = +(P.get('z') ?? this.sub.pos.z);
+      let x = P.has('x') ? +P.get('x') : this.sub.pos.x;
+      if (!P.has('x')) {
+        const cx = trenchCenterX(z);
+        for (let i = 0; i < 400 && groundHeight(x, z, 0) > -d - alt; i++) x += (cx - x) > 0 ? 10 : -10;
+      }
+      this.sub.pos.set(x, -d, z);
       this.sub.vbt = 150;
-      const g = groundHeight(this.sub.pos.x, this.sub.pos.z, 0);
+      const g = groundHeight(x, z, 0);
       if (this.sub.pos.y < g + 4) this.sub.pos.y = g + 6;
+      this.sub.yaw = P.has('yaw') ? +P.get('yaw') : -Math.PI / 2; // face the trench (east)
     }
     if (P.has('yaw')) this.sub.yaw = +P.get('yaw');
     this.sub._updateQuat();
