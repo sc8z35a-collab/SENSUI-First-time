@@ -50,12 +50,16 @@ export class MarineSnow {
           L += uAmb * 0.5;
           // forward scatter bias: particles near the view axis glint more
           vCol = L * (0.5 + seed) * vec3(0.85, 0.93, 1.0);
-          vA = keep * smoothstep(uBox * 0.5, uBox * 0.3, length(wp - uCam)) * smoothstep(0.25, 1.2, d) * (1.0 + uSilt * 3.0);
+          vA = keep * smoothstep(uBox * 0.5, uBox * 0.3, length(wp - uCam)) * smoothstep(1.5, 3.0, length(wp - uCam)) * (1.0 + uSilt * 3.0);
+          // physical flake size (0.5-5 mm) with a defocus floor; never inside the hull (r~1.1m)
+          float sz = (0.35 + seed * seed * seed * 2.2 + uSilt * 1.2) * uPR * 26.0 / max(d, 0.1);
+          float px = clamp(sz, 1.0, 18.0 * uPR);
+          vA *= min(1.0, sz / px) * (px > 6.0 * uPR ? 6.0 * uPR / px + 0.25 : 1.0);
           gl_Position = projectionMatrix * mv;
-          gl_PointSize = (0.6 + seed * seed * 3.0 + uSilt * 2.0) * uPR * 42.0 / d;
+          gl_PointSize = px;
         }`,
       fragmentShader: /* glsl */`varying float vA; varying vec3 vCol;
-        void main(){ vec2 c = gl_PointCoord - 0.5; float r = dot(c, c); if (r > 0.25) discard; float a = (1.0 - r * 4.0); gl_FragColor = vec4(vCol * a * vA * 0.6, 1.0); }`,
+        void main(){ vec2 c = gl_PointCoord - 0.5; float r = dot(c, c); if (r > 0.25) discard; float a = smoothstep(0.25, 0.02, r); gl_FragColor = vec4(vCol * a * vA * 0.6, 1.0); }`,
     });
     this.points = new THREE.Points(g, this.mat);
     this.points.frustumCulled = false;
