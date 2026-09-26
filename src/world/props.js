@@ -18,12 +18,13 @@ function shipHull(L, B, D, { bowRake = 0.25, segs = 48, ring = 20, sternCut = 0.
     const t = i / segs;                         // 0 stern .. 1 bow
     const z = (t - 0.5) * L;
     // beam distribution: fine bow, fuller stern
-    let bw = t > 0.7 ? Math.cos(((t - 0.7) / 0.3) * Math.PI / 2) ** 0.8 : t < sternCut ? 0.75 + 0.25 * (t / sternCut) : 1;
+    let bw = t > 0.7 ? Math.max(0, Math.cos(((t - 0.7) / 0.3) * Math.PI / 2)) ** 0.8 : t < sternCut ? 0.75 + 0.25 * (t / sternCut) : 1;
     bw = Math.max(bw, 0.02);
     const keelRise = t > 0.85 ? (t - 0.85) / 0.15 * D * bowRake : 0;
     for (let j = 0; j <= ring; j++) {
       const a = (j / ring) * Math.PI;           // 0 = port deck edge .. pi = stbd deck edge
-      const s = Math.sin(a), c = Math.cos(a);
+      // clamp: sin(pi) is ~1e-16 and may be slightly negative -> pow() of a negative base = NaN
+      const s = Math.max(0, Math.sin(a)), c = Math.cos(a);
       const x = -c * (B / 2) * bw * (0.35 + 0.65 * Math.pow(s, 0.15));
       const y = -Math.pow(s, 1.6) * (D - keelRise) + (t > 0.9 ? (t - 0.9) * D * 0.8 : 0);
       pos.push(x, y, z);
