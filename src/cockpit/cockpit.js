@@ -314,6 +314,20 @@ export class Cockpit {
       l.position.copy(onSphere(new THREE.Vector3(sx * 0.42, 0.88, 0.1), SPHERE_R - 0.12));
       S.add(l); this.cabinLights.push(l);
     }
+    // wall-washer LED pucks in the upper tray, aimed down along the lining (grazing light brings
+    // out the paint stipple, seams and pillowed panels exactly like cabin lighting in real HOVs)
+    this.washers = [];
+    for (const [lon, lat] of [[1.9, 0.34], [-1.9, 0.34], [2.7, 0.34], [-2.7, 0.34]]) {
+      const d = new THREE.Vector3(Math.cos(lat) * Math.sin(lon), Math.sin(lat), -Math.cos(lat) * Math.cos(lon));
+      const w = new THREE.SpotLight(0xffe6c8, 0.6, 1.8, 0.9, 0.9, 2);
+      w.position.copy(d).multiplyScalar(SPHERE_R - 0.09);
+      const down = new THREE.Vector3(Math.cos(lat - 0.9) * Math.sin(lon), Math.sin(lat - 0.9), -Math.cos(lat - 0.9) * Math.cos(lon)).multiplyScalar(SPHERE_R - 0.06);
+      w.target.position.copy(down);
+      S.add(w); S.add(w.target); this.washers.push(w);
+      const puck = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.01, 16), new THREE.MeshBasicMaterial({ color: 0xfff0dd, toneMapped: false }));
+      puck.position.copy(w.position); puck.lookAt(down); puck.rotateX(Math.PI / 2); S.add(puck);
+      w.userData.puck = puck;
+    }
     const key = new THREE.SpotLight(0xfff0e0, 3.5, 4, 1.0, 0.8, 1.5);
     key.position.set(0, 0.85, 0.3); key.target.position.set(0, -0.4, -0.5);
     key.castShadow = true; key.shadow.mapSize.set(1024, 1024); key.shadow.bias = -0.0005; key.shadow.radius = 4;
@@ -560,6 +574,7 @@ export class Cockpit {
     const L = cabinOn ? sys.lights.cabin : 0;
     const flick = sys.fire.active || (sub.floodL > 150) ? (Math.random() < 0.05 ? 0.2 : 1) : 1;
     for (const l of this.cabinLights) l.intensity = 1.2 * L * flick;
+    for (const w of this.washers) { w.intensity = 1.6 * L * flick; w.userData.puck.material.color.setRGB(1, 0.94, 0.86).multiplyScalar(0.05 + L * 6 * flick); }
     this.keyLight.intensity = 3.5 * L * flick;
     this.stripMat.color.setRGB(1, 0.94, 0.86).multiplyScalar((0.1 + L * 2.4) * flick);
     const alarm = st.alarmLevel || 0;

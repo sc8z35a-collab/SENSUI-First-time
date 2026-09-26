@@ -51,7 +51,7 @@ function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.004, bevel = 0.012, 
       const rr = r - inset - 0.004 * bev;
       pos.push(d.x * rr, d.y * rr, d.z * rr);
       // metric UVs (1 unit ≈ 0.45 m) so texel density is constant over the sphere
-      const U = u * (lon1 - lon0) * Math.cos((lat0 + lat1) / 2) * r * 2.2, V = v * (lat1 - lat0) * r * 2.2;
+      const U = u * (lon1 - lon0) * Math.cos((lat0 + lat1) / 2) * r * 3.3, V = v * (lat1 - lat0) * r * 3.3;
       uv.push(ou + (flip ? V : U), ov + (flip ? U : V));
       // distance to the panel edge in metres (edge wear, handling marks, dirt in the seams)
       edge.push(Math.min(u * (lon1 - lon0) * Math.cos(lat) * r, (1 - u) * (lon1 - lon0) * Math.cos(lat) * r, v * (lat1 - lat0) * r, (1 - v) * (lat1 - lat0) * r));
@@ -236,7 +236,7 @@ export function buildOutfit(S, { R, ports, mats, dark, floorY }) {
 //  - micro-roughness breakup so specular highlights are never uniform
 function panelMaterial(T, color, ports, key) {
   const m = new THREE.MeshStandardMaterial({ color, map: T.map, normalMap: T.normal, roughnessMap: T.orm, aoMap: T.orm, roughness: 1, metalness: 0, aoMapIntensity: 1 });
-  m.normalScale.set(0.9, 0.9);
+  m.normalScale.set(1.6, 1.6);
   const discard = portDiscard(ports, 0.03);
   m.onBeforeCompile = (sh) => {
     discard(sh);
@@ -249,7 +249,7 @@ function panelMaterial(T, color, ports, key) {
         float edgeBand = 1.0 - smoothstep(0.004, 0.035, vEdge);     // ~3 cm band along the edges
         float seam = 1.0 - smoothstep(0.0, 0.008, vEdge);           // dirt packed right at the seam
         diffuseColor.rgb *= vPt.x;                                   // paint batch / fading
-        diffuseColor.rgb *= 1.0 - 0.10 * edgeBand * (0.4 + vPt.y) - 0.25 * seam;
+        diffuseColor.rgb *= 1.0 - 0.10 * edgeBand * (0.4 + vPt.y) - 0.45 * seam;
         diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.93, 0.9, 0.84), vPt.z * 0.5);`)
       .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
         roughnessFactor = clamp(roughnessFactor - 0.12 * edgeBand * vPt.y + 0.08 * vPt.z, 0.12, 0.95);`);
