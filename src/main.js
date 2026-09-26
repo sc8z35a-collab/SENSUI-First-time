@@ -1,5 +1,15 @@
 // ABYSSAL DESCENT — entry: boot screen, title, game over.
+import * as THREE from 'three';
 import { Game } from './game.js';
+
+// dev diagnostics: report geometry with NaN positions (who built it)
+if (new URLSearchParams(location.search).has('dbgnan')) {
+  const orig = THREE.BufferGeometry.prototype.computeBoundingSphere;
+  THREE.BufferGeometry.prototype.computeBoundingSphere = function () {
+    orig.call(this);
+    if (Number.isNaN(this.boundingSphere?.radius)) console.warn('NaN-GEO', this.type, JSON.stringify(this.parameters || {}).slice(0, 160), (new Error().stack || '').split('\n').slice(2, 7).join(' <- '));
+  };
+}
 
 const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('gl');
