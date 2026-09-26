@@ -28,7 +28,7 @@ function portClearance(d, ports) {
 
 // One lining panel: a (lat0..lat1) x (lon0..lon1) patch at radius r, pushed inward at the centre
 // ("pillow") and bevelled towards the edges. Returns null if it would intersect a viewport.
-function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.004, bevel = 0.012, pillow = 0.006, seg = 12, ports, portMargin = 0.035 }) {
+function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.004, bevel = 0.012, pillow = 0.006, seg = 12, ports, portMargin = 0.0 }) {
   const dl = gap / r;
   lat0 += dl; lat1 -= dl; lon0 += dl / Math.max(0.2, Math.cos((lat0 + lat1) / 2)); lon1 -= dl / Math.max(0.2, Math.cos((lat0 + lat1) / 2));
   const nu = seg, nv = seg;
@@ -52,8 +52,10 @@ function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.004, bevel = 0.012, 
   // drop only the triangles that intrude into a viewport cone (the trim ring hides the jagged edge)
   for (let j = 0; j < nv; j++) for (let i = 0; i < nu; i++) {
     const a = j * (nu + 1) + i, b = a + 1, c = a + nu + 1, d = c + 1;
-    if (clear[a] && clear[b] && clear[c]) idx.push(a, b, c);
-    if (clear[b] && clear[d] && clear[c]) idx.push(b, d, c);
+    // keep a triangle unless it lies completely inside a port; the exact circular edge is cut
+    // per-fragment by portDiscard() on the lining material (smooth, no staircase)
+    if (clear[a] || clear[b] || clear[c]) idx.push(a, b, c);
+    if (clear[b] || clear[d] || clear[c]) idx.push(b, d, c);
   }
   if (!idx.length) return null;
   const g = new THREE.BufferGeometry();
@@ -88,6 +90,9 @@ export function buildOutfit(S, { R, ports, mats, dark, floorY }) {
       addScrews(screws, la0, la1, lo0, lo1, rLining - 0.004, ports);
     }
   }
+  // lining materials cut exactly at the trim ring radius
+  const cut = (m, key) => { const c = m.clone(); c.onBeforeCompile = portDiscard(ports, 0.03); c.customProgramCacheKey = () => 'lining-vp-' + key; return c; };
+  mats = { ...mats, panel: cut(mats.panel, 'a'), panelDark: cut(mats.panelDark, 'b') };
   const lining = new THREE.Mesh(mergeGeometries(panelGeos), mats.panel);
   lining.receiveShadow = true; lining.castShadow = false; lining.name = 'lining';
   S.add(lining);
