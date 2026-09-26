@@ -7,7 +7,7 @@ import { proceduresFor } from '../sim/incidents.js';
 import { BREAKERS } from '../sim/systems.js';
 import { zoneName, pressureAt, toBar, temperatureAt } from '../sim/env.js';
 import { SPECIES } from '../world/life.js';
-import { QUALITY } from '../game.js';
+import { QUALITY } from '../core/quality.js';
 
 const fmt = (v, d = 0) => (Number.isFinite(v) ? v.toFixed(d) : '---');
 const h = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; return e; };
