@@ -7,6 +7,7 @@ import { proceduresFor } from '../sim/incidents.js';
 import { BREAKERS } from '../sim/systems.js';
 import { zoneName, pressureAt, toBar, temperatureAt } from '../sim/env.js';
 import { SPECIES } from '../world/life.js';
+import { QUALITY } from '../game.js';
 
 const fmt = (v, d = 0) => (Number.isFinite(v) ? v.toFixed(d) : '---');
 const h = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; return e; };
@@ -68,6 +69,7 @@ export class HUD {
 
     // ---------------------------------------------------------------- caution / warning banner
     this.banner = h('div', 'hud-banner');
+    this.banner.addEventListener('pointerdown', (e) => e.stopPropagation());
     this.banner.addEventListener('click', (e) => { e.stopPropagation(); this.g.audio.klaxonMuted = true; this.open('dc'); });
     L.appendChild(this.banner);
     // message ticker
@@ -75,6 +77,7 @@ export class HUD {
     L.appendChild(this.ticker);
     // repair progress
     this.repairBar = h('div', 'hud-repair', '<div class="rb-l"></div><div class="rb-bar"><i></i></div><button class="hb sm">中止</button>');
+    this.repairBar.addEventListener('pointerdown', (e) => e.stopPropagation());
     this.repairBar.querySelector('button').addEventListener('click', (e) => { e.stopPropagation(); this.g.inc.cancelRepair(); });
     this.rbL = this.repairBar.querySelector('.rb-l'); this.rbI = this.repairBar.querySelector('i');
     L.appendChild(this.repairBar);
@@ -123,7 +126,7 @@ export class HUD {
     this._t += dt;
     const m = ap.m || {};
     const E = this.el;
-    const dep = m.depth ?? sub.depth;
+    const dep = Math.max(0, m.depth ?? sub.depth);
     E.hDepth.textContent = dep < 100 ? fmt(dep, 1) : fmt(dep).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     const vz = -sub.vel.y;
     E.hVz.textContent = `${vz >= 0 ? '▼' : '▲'} ${fmt(Math.abs(vz), 2)} m/s`;
@@ -143,10 +146,11 @@ export class HUD {
     this.qLight.classList.toggle('on', sys.powered('LIGHT') && sys.lights.main > 0);
     this.qFine.classList.toggle('on', g.controls.precision);
     this.qFlood.classList.toggle('run', sub.vbtFlow > 0); this.qPump.classList.toggle('run', sub.vbtFlow < 0);
+    this.tabBtns.dc.classList.toggle('alert', inc.active.some((f) => !f.resolved) && this.panel !== 'dc');
 
     // banner: most severe unresolved fault
     const act = inc.active.filter((f) => !f.resolved).sort((a, b) => b.sev - a.sev);
-    if (act.length) {
+    if (act.length && this.panel !== 'dc') {
       const f = act[0];
       this.banner.className = 'hud-banner show ' + sevCls[f.sev] + (Math.sin(this._t * 8) > 0 && f.sev >= 3 ? ' blink' : '');
       const txt = `<b>${f.sev >= 3 ? 'WARNING' : 'CAUTION'}</b> ${f.title}${act.length > 1 ? ` <i>+${act.length - 1}</i>` : ''}<span>タップで対処 ▶</span>`;
@@ -176,9 +180,12 @@ export class HUD {
   }
 
   msg(text, level = 'info') {
+    const now = performance.now();
+    if (this._lastMsg === text && now - this._lastMsgT < 2500) return; // de-duplicate bursts
+    this._lastMsg = text; this._lastMsgT = now;
     const e = h('div', 'tk ' + level, text);
     this.ticker.prepend(e);
-    while (this.ticker.children.length > 4) this.ticker.lastChild.remove();
+    while (this.ticker.children.length > 3) this.ticker.lastChild.remove();
     setTimeout(() => e.classList.add('fade'), 6000);
     setTimeout(() => e.remove(), 7000);
   }
@@ -257,7 +264,7 @@ export class HUD {
   _p_dc(body) {
     const { inc, sys, sub } = this.g;
     const act = inc.active.filter((f) => !f.resolved);
-    if (body === null) return 'dc' + act.map((f) => f.id + ':' + proceduresFor(f, sys, sub).map((p) => p.label).join('/')).join(',') + (inc.repair ? 'R' : '');
+    if (body === null) return 'dc' + act.map((f) => f.id + ':' + proceduresFor(f, sys, sub).map((p) => p.label).join('/')).join(',') + ':' + inc.sealant + ':' + sys.fire.suppressant;
     if (body === undefined) return this._patch();
     const sum = this._grp(body);
     const s = h('div', 'dc-sum'); sum.appendChild(s);
@@ -270,7 +277,7 @@ export class HUD {
       const row = h('div', 'btnrow'); c.appendChild(row);
       for (const p of proceduresFor(f, sys, sub)) {
         const b = this._btn(row, `${p.label}<small>${p.time}s${p.needs ? ' · 要シーラント' : ''}</small>`, () => { if (inc.startRepair(f, p)) { this.g.audio.play('tool'); } }, 'proc');
-        if (inc.repair) b.disabled = true;
+        this._live(b, (e) => { e.disabled = !!inc.repair; });
       }
     }
     // emergency actions always available
@@ -359,11 +366,11 @@ export class HUD {
   // ---------------- NAV
   _p_nav(body) {
     const { ap, sub } = this.g;
-    if (body === null) return 'nav' + (ap.nav.poi?.id || '');
+    if (body === null) return 'nav' + (ap.nav.on ? ap.nav.poi?.id || '' : '-') + ':' + this.g.discovered.size;
     if (body === undefined) return this._patch();
     const info = this._grp(body);
     const st = h('div', 'pr'); info.appendChild(st);
-    this._live(st, (e) => { e.innerHTML = ap.nav.on ? `目的地 <b>${ap.nav.poi?.name}</b> · 残距離 <b>${fmt(ap.navDist)} m</b> · 到着予想 ${fmt(ap.navDist / Math.max(0.2, sub.speed) / 60, 1)} 分` : `現在位置 X ${fmt(sub.pos.x)} / Z ${fmt(sub.pos.z)} · 母船まで ${fmt(Math.hypot(sub.pos.x, sub.pos.z - 150))} m · 最大深度 ${fmt(sub.maxDepth)} m`; });
+    this._live(st, (e) => { e.innerHTML = ap.nav.on ? `目的地 <b>${ap.nav.poi?.name}</b> · 残距離 <b>${fmt(ap.navDist)} m</b> · 到着予想 ${fmt((ap.navDist || 0) / Math.max(0.2, Math.abs(sub.speed)) / 60, 1)} 分` : `現在位置 X ${fmt(sub.pos.x)} / Z ${fmt(sub.pos.z)} · 母船まで ${fmt(Math.hypot(sub.pos.x + 10, sub.pos.z - 150))} m · 最大深度 ${fmt(sub.maxDepth)} m`; });
     const list = h('div', 'poi-list'); body.appendChild(list);
     for (const p of POIS) {
       const c = h('div', 'poi' + (ap.nav.poi === p && ap.nav.on ? ' on' : '') + (this.g.discovered.has(p.id) ? ' found' : '')); list.appendChild(c);
@@ -379,7 +386,7 @@ export class HUD {
   // ---------------- LOG
   _p_log(body) {
     const g = this.g;
-    if (body === null) return 'log' + g.sys.messages.length + ':' + g.life.sightings.size;
+    if (body === null) { const m = g.sys.messages; return 'log' + m.length + ':' + (m[m.length - 1]?.t ?? 0) + ':' + g.life.sightings.size; }
     if (body === undefined) return this._patch();
     const s = this._grp(body, `STATS 潜航記録`);
     const st = h('div', 'pr'); s.appendChild(st);
@@ -394,12 +401,16 @@ export class HUD {
     const ul = h('div', 'msgs'); lg.appendChild(ul);
     for (const m of g.sys.messages.slice(-40).reverse()) ul.appendChild(h('div', 'm ' + m.level, `<i>T+${fmt(m.t)}s</i> ${m.text}`));
     const set = this._grp(body, 'SETTINGS 設定');
-    const sr = h('div', 'btnrow'); set.appendChild(sr);
+    const qr = h('div', 'btnrow'); set.appendChild(qr);
+    qr.appendChild(h('span', 'pv', '画質'));
+    QUALITY.forEach((Q, i) => { const b = this._btn(qr, `${Q.ja}<small>${Q.name}</small>`, () => g.setQuality(i), 'sm'); this._live(b, (e) => e.classList.toggle('on', g.quality === i)); });
+    const sr = h('div', 'set-grid'); set.appendChild(sr);
     const snd = this._btn(sr, '', () => { g.audio.enabled = !g.audio.enabled; }); this._live(snd, (e) => { e.innerHTML = `サウンド<small>${g.audio.enabled ? 'ON' : 'OFF'}</small>`; });
-    const vo = this._btn(sr, '', () => { g.audio.voice = !g.audio.voice; }); this._live(vo, (e) => { e.innerHTML = `母船音声<small>${g.audio.voice ? 'ON' : 'OFF'}</small>`; });
+    const vo = this._btn(sr, '', () => { g.audio.voice = !g.audio.voice; if (!g.audio.voice) { try { speechSynthesis.cancel(); } catch { /* ignore */ } } }); this._live(vo, (e) => { e.innerHTML = `母船音声<small>${g.audio.voice ? 'ON' : 'OFF'}</small>`; });
     const df = this._btn(sr, '', () => { const L = [0.5, 1, 2]; g.inc.rateMul = L[(L.indexOf(g.inc.rateMul) + 1) % L.length]; }); this._live(df, (e) => { e.innerHTML = `トラブル頻度<small>${{ 0.5: '低', 1: '標準', 2: '高' }[g.inc.rateMul] || g.inc.rateMul}</small>`; });
-    const q = this._btn(sr, '', () => { g.quality = (g.quality + 1) % 3; g.applyQuality(); }); this._live(q, (e) => { e.innerHTML = `画質<small>${['高', '超高', '最高 (ネイティブ)'][g.quality]}</small>`; });
-    const ls = this._btn(sr, '', () => { const L = [0.003, 0.0042, 0.006]; g.controls.lookSens = L[(L.indexOf(g.controls.lookSens) + 1) % L.length]; }); this._live(ls, (e) => { e.innerHTML = `視点感度<small>${{ 0.003: '低', 0.0042: '中', 0.006: '高' }[g.controls.lookSens]}</small>`; });
+    const fs = this._btn(sr, '全画面<small>FULLSCREEN</small>', () => g.requestFullscreen());
+    const LS = [0.003, 0.0042, 0.006];
+    const ls = this._btn(sr, '', () => { const i = LS.findIndex((x) => Math.abs(x - g.controls.lookSens) < 1e-6); g.controls.lookSens = LS[(i + 1) % LS.length]; try { localStorage.setItem('ad-look', g.controls.lookSens); } catch { /* ignore */ } }); this._live(ls, (e) => { const i = LS.findIndex((x) => Math.abs(x - g.controls.lookSens) < 1e-6); e.innerHTML = `視点感度<small>${['低', '中', '高'][i] ?? '中'}</small>`; });
     this._btn(sr, 'セーブ<small>SAVE</small>', () => { g.save(); g.sys.msg('航海記録を保存しました', 'good'); });
     this._guard(sr, '潜航を中止してタイトルへ', () => g.abort(), () => 'ABORT');
   }

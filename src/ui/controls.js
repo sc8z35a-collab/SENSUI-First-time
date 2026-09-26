@@ -81,7 +81,7 @@ export class Controls {
     this.look = { yaw: 0, pitch: 0, vy: 0, vp: 0, id: null, lx: 0, ly: 0, t0: 0, moved: 0, sx: 0, sy: 0 };
     this.onTap = onTap; this.onLook = onLook;
     this.precision = false; // fine-control mode halves all demands
-    this.lookSens = 0.0042;
+    this.lookSens = (() => { try { const v = +localStorage.getItem('ad-look'); return v > 0 ? v : 0.0042; } catch { return 0.0042; } })();
     this.enabled = true;
 
     const el = this.layer;
