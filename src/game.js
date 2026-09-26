@@ -11,7 +11,7 @@ import { Submarine, SPEC } from './sim/sub.js';
 import { Systems } from './sim/systems.js';
 import { Incidents } from './sim/incidents.js';
 import { Autopilot, heading } from './sim/autopilot.js';
-import { Cockpit, SPHERE_CENTER, EYE } from './cockpit/cockpit.js';
+import { Cockpit, SPHERE_CENTER, EYE, EYE_PITCH } from './cockpit/cockpit.js';
 import { MFDRenderer } from './cockpit/mfd.js';
 import { Exterior } from './world/exterior.js';
 import { MarineSnow, Bubbles, Life, SPECIES } from './world/life.js';
@@ -487,11 +487,14 @@ export class Game {
     const cam = this.camera;
     const L = this.controls.look;
     if (L.id === null) { L.yaw *= 1 - Math.min(1, dt * 0.25); L.pitch *= 1 - Math.min(1, dt * 0.25); }
-    const yawL = L.yaw + +(this.params.get('lx') ?? 0), pitchL = L.pitch + +(this.params.get('ly') ?? 0);
+    const yawL = L.yaw + +(this.params.get('lx') ?? 0), pitchL = EYE_PITCH + L.pitch + +(this.params.get('ly') ?? 0);
     const eye = _v.copy(SPHERE_CENTER).add(EYE);
+    // neck/torso kinematics driven by the look offset (not the resting gaze): turning the head
+    // swings the eyes ~12 cm around the neck; looking down the pilot leans towards the lower port
+    const lp = pitchL - EYE_PITCH;
     eye.x += Math.sin(yawL) * 0.12;
-    eye.z -= (1 - Math.cos(yawL)) * 0.05 - Math.max(0, -pitchL) * 0.12;
-    eye.y += Math.min(0, pitchL) * 0.05 - Math.max(0, -pitchL) * 0.06;
+    eye.z -= (1 - Math.cos(yawL)) * 0.05 + Math.max(0, -lp) * 0.16;
+    eye.y -= Math.max(0, -lp) * 0.1 - Math.max(0, lp) * 0.03;
     const accB = _v2.copy(sub.acc || _zero).applyQuaternion(_q2.copy(sub.quat).invert());
     this._headOff.lerp(accB.multiplyScalar(-0.04).clampLength(0, 0.06), Math.min(1, dt * 3));
     eye.add(this._headOff);

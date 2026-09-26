@@ -7,10 +7,12 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { pbrMaterial, paintedMaterial, tex } from '../render/textures.js';
 import { canvasTexture, placard, FONT, MONO } from './canvasTex.js';
 import { BREAKERS } from '../sim/systems.js';
+import { buildOutfit } from './outfit.js';
 
 export const SPHERE_R = 1.05;
 export const SPHERE_CENTER = new THREE.Vector3(0, 0.05, -2.3); // body frame
-export const EYE = new THREE.Vector3(0, 0.12, 0.28);            // relative to sphere centre
+export const EYE = new THREE.Vector3(0, 0.06, 0.2);             // relative to sphere centre (seated pilot, eyes ~0.8 m above deck)
+export const EYE_PITCH = -0.19;                                  // natural resting gaze: ~11° down, main viewport centred
 export const VIEWPORTS = [
   { dir: new THREE.Vector3(0, -0.24, -1).normalize(), half: 0.52, main: true },
   { dir: new THREE.Vector3(-0.82, -0.28, -0.5).normalize(), half: 0.2 },
@@ -94,15 +96,23 @@ export class Cockpit {
     const pad = new THREE.Mesh(padGeo, shellMaterial(leather.clone()));
     pad.material.side = THREE.BackSide; pad.receiveShadow = true;
     S.add(pad);
-    // meridian ribs / stiffeners & weld seams
-    for (let i = 0; i < 8; i++) {
-      const rib = new THREE.Mesh(new THREE.TorusGeometry(SPHERE_R - 0.01, 0.012, 6, 128, Math.PI * 0.95), darkMetal);
-      rib.rotation.y = (i / 8) * Math.PI; rib.rotation.z = Math.PI * 0.525;
-      rib.rotation.order = 'YZX';
-      S.add(rib);
-    }
-    const equator = new THREE.Mesh(new THREE.TorusGeometry(SPHERE_R - 0.012, 0.02, 8, 160), titanium);
-    equator.rotation.x = Math.PI / 2; S.add(equator);
+    // interior lining panels, cable trays, handles, placards, pilot kit
+    const panelMat = paint.clone(); panelMat.color.set(0xd4d0c6);
+    const panelDark = paint.clone(); panelDark.color.set(0x5d6166);
+    this.outfit = buildOutfit(S, {
+      R: SPHERE_R, ports: VIEWPORTS, floorY: -0.62, dark: new THREE.MeshStandardMaterial({ color: 0x15171a, roughness: 0.7, metalness: 0.4 }),
+      mats: {
+        panel: panelMat, panelDark,
+        steel: new THREE.MeshStandardMaterial({ color: 0xb8bcc0, metalness: 1, roughness: 0.32 }),
+        anodised: new THREE.MeshStandardMaterial({ color: 0x1b1d21, metalness: 0.6, roughness: 0.38 }),
+        cable, cableOr,
+        strap: new THREE.MeshStandardMaterial({ color: 0x202226, roughness: 0.95 }),
+        handle: new THREE.MeshStandardMaterial({ color: 0xf2b400, roughness: 0.4, metalness: 0.1 }),
+        firstAid: new THREE.MeshStandardMaterial({ color: 0xe8e6e0, roughness: 0.6 }),
+        bottle: new THREE.MeshPhysicalMaterial({ color: 0x9fc8e8, roughness: 0.15, transparent: true, opacity: 0.7, clearcoat: 1 }),
+        clipboard: new THREE.MeshStandardMaterial({ color: 0x3a2a1a, roughness: 0.7 }),
+      },
+    });
 
     // ---------------------------------------------------- viewports (bore + frame + glass)
     this.glass = [];
