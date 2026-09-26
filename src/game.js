@@ -22,6 +22,18 @@ import { Controls } from './ui/controls.js';
 import { HUD } from './ui/hud.js';
 
 const SAVE_KEY = 'abyssal-descent-save-v1';
+// graphics presets. LOW is for battery saving / thermal throttling; ULTRA = native resolution.
+export const QUALITY = [
+  { name: 'LOW', ja: '低', pr: 1.0, shadow: 0, shadowMap: 512, bloom: 3, volSteps: 16, shafts: 8, msaa: 0, snow: 0.35, cockpitShadow: false, aniso: 2 },
+  { name: 'HIGH', ja: '高', pr: 1.5, shadow: 1, shadowMap: 1024, bloom: 5, volSteps: 32, shafts: 12, msaa: 4, snow: 0.7, cockpitShadow: true, aniso: 8 },
+  { name: 'VERY HIGH', ja: '超高', pr: 2.0, shadow: 1, shadowMap: 2048, bloom: 6, volSteps: 48, shafts: 16, msaa: 4, snow: 1, cockpitShadow: true, aniso: 16 },
+  { name: 'ULTRA', ja: '最高', pr: 3.0, shadow: 1, shadowMap: 4096, bloom: 6, volSteps: 64, shafts: 16, msaa: 4, snow: 1, cockpitShadow: true, aniso: 16 },
+];
+const QKEY = 'ad-quality-v2';
+function loadQuality() {
+  try { const v = localStorage.getItem(QKEY); if (v !== null && QUALITY[+v]) return +v; } catch { /* ignore */ }
+  return 2; // flagship default
+}
 const H = 1 / 60; // fixed simulation step
 const MOTHERSHIP = new THREE.Vector3(-10, 0, 150);
 const DEATH = {
@@ -39,7 +51,7 @@ export class Game {
     this.canvas = canvas; this.ui = ui; this.params = params;
     this.manual = params.has('manual');
     this.timeScale = 1;
-    this.quality = +(localStorage.getItem('ad-quality') ?? 2);
+    this.quality = params.has('q') && QUALITY[+params.get('q')] ? +params.get('q') : loadQuality();
     this.state = 'boot';
     this.discovered = new Set();
     this.sampled = new Set();
@@ -59,14 +71,17 @@ export class Game {
   // ------------------------------------------------------------------ boot
   async boot(progress = () => {}) {
     const r = (this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: false, powerPreference: 'high-performance', preserveDrawingBuffer: this.manual, stencil: false }));
+    // mobile GPUs drop the context when the app is backgrounded for long: pause, then resume cleanly
+    this.canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); this._ctxLost = true; if (this.state === 'play') this.save(); }, false);
+    this.canvas.addEventListener('webglcontextrestored', () => { this._ctxLost = false; this.applyQuality(); }, false);
     r.outputColorSpace = THREE.LinearSRGBColorSpace;
     r.toneMapping = THREE.NoToneMapping;
     r.shadowMap.enabled = true;
-    r.shadowMap.type = THREE.PCFSoftShadowMap;
+    r.shadowMap.type = THREE.PCFShadowMap; // PCFSoft was removed in r18x (warned + fell back every boot)
     setMaxAnisotropy(r.capabilities.getMaxAnisotropy());
     this.pipe = new Pipeline(r);
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(74, 1, 0.03, 900);
+    this.camera = new THREE.PerspectiveCamera(74, innerWidth / Math.max(1, innerHeight), 0.03, 900);
     this.scene.add(this.camera);
     // down-welling daylight
     this.hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 0.8); this.scene.add(this.hemi);
@@ -89,7 +104,7 @@ export class Game {
     this.ext = await new Exterior(this.scene).build();
     this.pipe.spots = this.ext.spots;
     progress(0.6, '海洋生物');
-    this.snow = new MarineSnow(this.scene, 14000, 28);
+    this.snow = new MarineSnow(this.scene, 16000, 28);
     this.bubbles = new Bubbles(this.scene, 2000);
     this.life = new Life(this.scene);
     this.props = new Props(this.scene);
@@ -100,8 +115,14 @@ export class Game {
     this.controls = new Controls(this.ui, { onTap: (x, y) => this._tap(x, y) });
     this.hud = new HUD(this.ui, this);
     this._wire();
-    addEventListener('resize', () => this.resize());
-    this.resize();
+    // resize: debounce + re-read after orientation / fullscreen transitions (innerHeight settles late on Android)
+    const onResize = () => { clearTimeout(this._rzT); this.resize(); this._rzT = setTimeout(() => this.resize(), 300); };
+    addEventListener('resize', onResize);
+    addEventListener('orientationchange', onResize);
+    document.addEventListener('fullscreenchange', onResize);
+    document.addEventListener('webkitfullscreenchange', onResize);
+    window.visualViewport?.addEventListener('resize', onResize);
+    this.applyQuality(true);
 
     // warm up terrain around the start (and around a teleport target in dev mode)
     this._applyDevStart();
@@ -110,6 +131,7 @@ export class Game {
     progress(1, '準備完了');
     this.state = 'title';
     this._clock.start();
+    this._clock.getDelta();
     this._loop = this._loop.bind(this);
     if (this.manual) this._manualLoop(); else requestAnimationFrame(this._loop);
     window.__game = this;
@@ -277,7 +299,8 @@ export class Game {
   // cockpit touch: ray into the interior scene
   _tap(x, y) {
     if (this.state !== 'play') return;
-    const ndc = new THREE.Vector2((x / innerWidth) * 2 - 1, -(y / innerHeight) * 2 + 1);
+    const rect = this.canvas.getBoundingClientRect();
+    const ndc = new THREE.Vector2(((x - rect.left) / rect.width) * 2 - 1, -((y - rect.top) / rect.height) * 2 + 1);
     const rc = (this._rc ||= new THREE.Raycaster());
     rc.setFromCamera(ndc, this.camera);
     const hits = rc.intersectObjects(this.cockpit.scene.children, true);
@@ -326,26 +349,38 @@ export class Game {
 
   // ------------------------------------------------------------------ lifecycle
   start(fromSave) {
-    this.audio.start();
+    if (this.state === 'play') return;
+    this.requestFullscreen(); // must run synchronously inside the tap handler (user activation)
+    this.audio.start().catch?.(() => {});
+    this.controls.reset();
     if (fromSave) this.load();
     else {
       this.sys.msg('DSV-11 わだつみ 潜航開始。全系統正常。', 'good');
       setTimeout(() => this.radio('わだつみ、こちら母船かいれい。潜航を許可する。良い航海を。'), 2500);
     }
     this.state = 'play';
+    this._devStart = false;
     this.inc.clock = 0;
-    this.requestFullscreen();
+    this._clock.getDelta(); this._acc = 0; // no catch-up burst after the title screen
+    this.ui.classList.add('play');
   }
+  static isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
   requestFullscreen() {
     const el = document.documentElement;
     const fs = el.requestFullscreen || el.webkitRequestFullscreen;
-    const lock = () => screen.orientation?.lock?.('landscape').catch(() => {});
-    if (fs && !document.fullscreenElement) { try { const p = fs.call(el, { navigationUI: 'hide' }); p?.then?.(lock).catch(() => {}); } catch { /* ignore */ } } else lock();
+    const lock = () => { try { screen.orientation?.lock?.('landscape')?.catch?.(() => {}); } catch { /* ignore */ } };
+    if (Game.isFullscreen()) { lock(); return; }
+    if (!fs) return;
+    try {
+      const p = fs.call(el, { navigationUI: 'hide' });
+      if (p && p.then) p.then(lock, () => {}); else setTimeout(lock, 200);
+    } catch { /* not allowed (no user gesture) */ }
   }
   abort() { this.save(); location.reload(); }
 
   save() {
     try {
+      if (this.state !== 'play' || this.sys.dead) return;
       const d = { v: 1, sub: this.sub.serialize(), sys: this.sys.serialize(), inc: this.inc.serialize(), ap: this.ap.serialize(), disc: [...this.discovered], sampled: [...this.sampled], samples: this.samples, sight: [...this.life.sightings], at: Date.now() };
       localStorage.setItem(SAVE_KEY, JSON.stringify(d));
     } catch (e) { console.warn('save failed', e); }
@@ -354,9 +389,13 @@ export class Game {
   static clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch { /* ignore */ } }
   load() {
     const d = Game.hasSave(); if (!d) return;
-    this.sub.restore(d.sub); this.sys.restore(d.sys);
+    try {
+      this.sub.restore(d.sub); this.sys.restore(d.sys);
+    } catch (e) { console.warn('corrupt save', e); Game.clearSave(); return; }
     this.inc.sealant = d.inc?.sealant ?? 2;
-    Object.assign(this.ap.hdg, d.ap.hdg); Object.assign(this.ap.depth, d.ap.depth);
+    this.inc.clock = d.inc?.clock ?? 0;
+    if (d.ap) { for (const k of ['hdg', 'depth', 'alt', 'speed']) if (d.ap[k]) Object.assign(this.ap[k], d.ap[k]); }
+    for (const m of [100, 200, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 10900]) if (this.sub.maxDepth > m) this._milestones.add(m);
     d.disc?.forEach((x) => this.discovered.add(x)); d.sampled?.forEach((x) => this.sampled.add(x)); this.samples = d.samples || 0;
     d.sight?.forEach((x) => this.life.sightings.add(x));
     this.sys.msg('航海記録を読み込みました', 'good');
@@ -369,7 +408,8 @@ export class Game {
     this.camera.fov = THREE.MathUtils.clamp(64 * (1.9 / Math.max(1.3, w / h)) + 10, 66, 82);
     this.camera.updateProjectionMatrix();
     const dpr = devicePixelRatio || 1;
-    const pr = this.params.has('pr') ? +this.params.get('pr') : [Math.min(dpr, 1.5), Math.min(dpr, 2), Math.min(dpr, 3)][this.quality] ?? 2;
+    const Q = QUALITY[this.quality] || QUALITY[2];
+    const pr = this.params.has('pr') ? +this.params.get('pr') : Math.min(dpr, Q.pr);
     this.pipe.setSize(w, h, pr);
     this._pr = pr;
     const k = pr * h / 400;
@@ -377,10 +417,29 @@ export class Game {
     this.snow.mat.uniforms.uPR.value = k;
     this.bubbles.mat.uniforms.uPR.value = k;
   }
-  applyQuality() {
-    try { localStorage.setItem('ad-quality', this.quality); } catch { /* ignore */ }
-    const sm = [1024, 2048, 4096][this.quality];
-    for (const l of this.ext.lamps) if (l.L.castShadow) { l.L.shadow.mapSize.set(sm, sm); l.L.shadow.map?.dispose(); l.L.shadow.map = null; }
+  setQuality(q) {
+    if (!QUALITY[q]) return;
+    this.quality = q;
+    try { localStorage.setItem(QKEY, String(q)); } catch { /* ignore */ }
+    this.applyQuality();
+  }
+  applyQuality(initial = false) {
+    const Q = QUALITY[this.quality] || QUALITY[2];
+    const r = this.renderer;
+    r.shadowMap.enabled = !!Q.shadow;
+    r.shadowMap.needsUpdate = true;
+    for (const l of this.ext.lamps) {
+      if (l.kind !== 'main') continue;
+      l.L.castShadow = !!Q.shadow;
+      l.L.shadow.mapSize.set(Q.shadowMap, Q.shadowMap);
+      l.L.shadow.map?.dispose(); l.L.shadow.map = null;
+    }
+    this.cockpit.setShadows?.(Q.cockpitShadow);
+    this.pipe.setQuality?.(Q);
+    this.snow.setDensityScale?.(Q.snow);
+    setMaxAnisotropy(Math.min(Q.aniso, r.capabilities.getMaxAnisotropy()));
+    // materials must recompile when shadow on/off changes
+    if (!initial) { this.scene.traverse((o) => { if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { m.needsUpdate = true; }); }); this.cockpit.scene.traverse((o) => { if (o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => { m.needsUpdate = true; }); }); }
     this.resize();
   }
 
@@ -389,7 +448,12 @@ export class Game {
   _loop() {
     requestAnimationFrame(this._loop);
     const dt = Math.min(0.1, this._clock.getDelta());
-    this._frame(dt);
+    if (this._ctxLost || document.hidden) return;
+    try { this._frame(dt); } catch (e) {
+      // never let one bad frame kill the loop silently: log once per message
+      const k = String(e && e.message);
+      if (!(this._errs ||= new Set()).has(k)) { this._errs.add(k); console.error(e); }
+    }
   }
 
   _frame(dt) {
@@ -416,16 +480,16 @@ export class Game {
     const { sub, sys, inc, ap } = this;
     const pilot = this.controls.read();
     this.pilot = pilot;
-    if (this.controls.active && this.timeScale > 1) this.setTimeScale(1);
+    if (this.timeScale > 1 && (Math.abs(pilot.surge) + Math.abs(pilot.yaw) + Math.abs(pilot.heave) + Math.abs(pilot.sway)) > 0.1) this.setTimeScale(1);
     const cap = THREE.MathUtils.clamp(sys.pilotHealth * 1.4 - 0.2, 0, 1);
     ap.update(dt, { surge: pilot.surge * cap, yaw: pilot.yaw * cap, heave: pilot.heave * cap, sway: pilot.sway * cap });
+    if (this.env.quake > 0) sub.extForce.add(_v.set((Math.random() - 0.5) * 6000, (Math.random() - 0.5) * 4000, (Math.random() - 0.5) * 6000));
     sub.step(dt, sys);
     sys.activeCautions = inc.cautionCount;
     sys.step(dt, this.env);
     inc.step(dt);
     this.crushMargin = SPEC.crushDepth * (1 - sys.hull.fatigue * 3 - (1 - sys.hull.integrity) * 0.5 - sys.hull.crack * 0.3) - sub.depth;
     sub.siltStir = Math.max(0, sub.siltStir - dt * 0.05);
-    if (this.env.quake > 0) sub.extForce.set((Math.random() - 0.5) * 6000, (Math.random() - 0.5) * 4000, (Math.random() - 0.5) * 6000);
 
     for (const p of POIS) {
       const d = Math.hypot(p.x - sub.pos.x, p.y - sub.pos.y, p.z - sub.pos.z);
@@ -452,7 +516,7 @@ export class Game {
       }
     }
     if (this._homeBound && !ap.nav.on && Math.hypot(sub.pos.x - MOTHERSHIP.x, sub.pos.z - MOTHERSHIP.z) < 40) { this._homeBound = false; ap.setMode('ascent', true); sys.msg('母船直下 — 自動浮上', 'good'); }
-    if (sub.depth < 1.5 && ap.ascent.on && ap.engaged && sub.maxDepth > 30) this._surface();
+    if (sub.depth < 1.5 && sub.maxDepth > 30 && (sub.vel.y > -0.05 || (ap.ascent.on && ap.engaged))) this._surface();
 
     if (sub.vbtFlow < 0 && Math.random() < dt * 25) this._burst(1, -0.5);
     if (sub.vbtFlow > 0 && Math.random() < dt * 10) this._burst(1, 0.9);
@@ -463,15 +527,24 @@ export class Game {
     if (sys.dead && this.state === 'play') this._die(sys.dead);
   }
 
+  _endCommon() {
+    this.controls.reset(); this.hud.releaseHolds(); this.hud.close();
+    this.timeScale = 1;
+    this.ui.classList.remove('play');
+    try { speechSynthesis?.cancel(); } catch { /* ignore */ }
+  }
   _surface() {
     if (this.state !== 'play') return;
     this.state = 'end';
+    this._endCommon();
     this.audio.play('surface');
     this.onEnd?.('surface', this._stats());
     Game.clearSave();
   }
   _die(cause) {
+    if (this.state !== 'play') return;
     this.state = 'end';
+    this._endCommon();
     if (cause === 'implosion') { this.audio.play('implode'); this.flash = 1; this.pipe.params.flashColor.set(1, 1, 1); }
     this.onEnd?.(cause, this._stats(), DEATH[cause]);
     Game.clearSave();
@@ -525,7 +598,9 @@ export class Game {
     const st = { subPos: sub.pos, camPos: cam.position, extLight, subQuat: sub.quat };
     this.props.update(t, st);
     this.life.update(dt, t, sub.pos, sub.vel, extLight > 0.2, sub.depth, st);
-    this.snow.update(t, cam.position, this.ext.spots.filter((s) => s.visible && s.intensity > 1), a, sub.depth, this.pipe.params.silt);
+    const sp = (this._snowSpots ||= []); sp.length = 0;
+    for (const s of this.ext.spots) if (s.visible && s.intensity > 1) sp.push(s);
+    this.snow.update(t, cam.position, sp, a, sub.depth, this.pipe.params.silt);
     this.bubbles.update(dt, a, extLight * 0.5);
 
     const unresolved = inc.active.filter((f) => !f.resolved);
