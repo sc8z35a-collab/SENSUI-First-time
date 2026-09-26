@@ -28,11 +28,15 @@ function portClearance(d, ports) {
 
 // One lining panel: a (lat0..lat1) x (lon0..lon1) patch at radius r, pushed inward at the centre
 // ("pillow") and bevelled towards the edges. Returns null if it would intersect a viewport.
-function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.004, bevel = 0.012, pillow = 0.006, seg = 12, ports, portMargin = 0.0 }) {
+function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.004, bevel = 0.012, pillow = 0.006, seg = 12, ports, portMargin = 0.0, rnd = Math.random }) {
   const dl = gap / r;
   lat0 += dl; lat1 -= dl; lon0 += dl / Math.max(0.2, Math.cos((lat0 + lat1) / 2)); lon1 -= dl / Math.max(0.2, Math.cos((lat0 + lat1) / 2));
   const nu = seg, nv = seg;
-  const pos = [], uv = [], idx = [];
+  const pos = [], uv = [], idx = [], edge = [], tint = [];
+  // each panel is cut from a different part of the "sheet" so dirt/stains never repeat visibly,
+  // and has its own slight paint-batch / fading difference
+  const ou = rnd() * 8, ov = rnd() * 8, flip = rnd() < 0.5;
+  const pt = [0.94 + rnd() * 0.08, rnd(), rnd()]; // brightness, wear amount, grime amount
   const clear = [];
   for (let j = 0; j <= nv; j++) {
     for (let i = 0; i <= nu; i++) {
@@ -46,7 +50,12 @@ function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.004, bevel = 0.012, 
       const inset = pillow * Math.sin(Math.PI * u) * Math.sin(Math.PI * v) + bevel * (1 - Math.sqrt(bev)) * -0.35;
       const rr = r - inset - 0.004 * bev;
       pos.push(d.x * rr, d.y * rr, d.z * rr);
-      uv.push(u * (lon1 - lon0) * r * 2.2, v * (lat1 - lat0) * r * 2.2);
+      // metric UVs (1 unit ≈ 0.45 m) so texel density is constant over the sphere
+      const U = u * (lon1 - lon0) * Math.cos((lat0 + lat1) / 2) * r * 2.2, V = v * (lat1 - lat0) * r * 2.2;
+      uv.push(ou + (flip ? V : U), ov + (flip ? U : V));
+      // distance to the panel edge in metres (edge wear, handling marks, dirt in the seams)
+      edge.push(Math.min(u * (lon1 - lon0) * Math.cos(lat) * r, (1 - u) * (lon1 - lon0) * Math.cos(lat) * r, v * (lat1 - lat0) * r, (1 - v) * (lat1 - lat0) * r));
+      tint.push(pt[0], pt[1], pt[2]);
     }
   }
   // drop only the triangles that intrude into a viewport cone (the trim ring hides the jagged edge)
@@ -61,6 +70,8 @@ function panelGeometry(lat0, lat1, lon0, lon1, r, { gap = 0.004, bevel = 0.012, 
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('edge', new THREE.Float32BufferAttribute(edge, 1));
+  g.setAttribute('ptint', new THREE.Float32BufferAttribute(tint, 3));
   g.setIndex(idx);
   g.computeVertexNormals();
   return g;
@@ -83,16 +94,15 @@ export function buildOutfit(S, { R, ports, mats, dark, floorY }) {
       // stagger alternate bands like brickwork so seams don't line up (real panel layouts do this)
       const off = (bands.findIndex((b) => b[0] === la0) % 2) * 0.5;
       const lo0 = ((k + off) / n) * Math.PI * 2 - Math.PI, lo1 = ((k + 1 + off) / n) * Math.PI * 2 - Math.PI;
-      const g = panelGeometry(la0, la1, lo0, lo1, rLining, { ports });
+      const g = panelGeometry(la0, la1, lo0, lo1, rLining, { ports, rnd });
       if (!g) continue;
       // a few panels are the darker "service access" type
       (rnd() < 0.12 ? accentGeos : panelGeos).push(g);
       addScrews(screws, la0, la1, lo0, lo1, rLining - 0.004, ports);
     }
   }
-  // lining materials cut exactly at the trim ring radius
-  const cut = (m, key) => { const c = m.clone(); c.onBeforeCompile = portDiscard(ports, 0.03); c.customProgramCacheKey = () => 'lining-vp-' + key; return c; };
-  mats = { ...mats, panel: cut(mats.panel, 'a'), panelDark: cut(mats.panelDark, 'b') };
+  // lining materials: photographic panel PBR, cut exactly at the trim-ring radius
+  mats = { ...mats, panel: panelMaterial(mats.panelTex, 0xd8d3c8, ports, 'a'), panelDark: panelMaterial(mats.panelTex, 0x6a6e73, ports, 'b') };
   const lining = new THREE.Mesh(mergeGeometries(panelGeos), mats.panel);
   lining.receiveShadow = true; lining.castShadow = false; lining.name = 'lining';
   S.add(lining);
@@ -210,13 +220,42 @@ export function buildOutfit(S, { R, ports, mats, dark, floorY }) {
 
   // ------------------------------------------------------------------ deck details: kick plates and floor light strip
   const kick = new THREE.Mesh(new THREE.CylinderGeometry(Math.sqrt(R * R - floorY * floorY) - 0.03, Math.sqrt(R * R - floorY * floorY) - 0.03, 0.06, 64, 1, true), mats.panelDark);
-  kick.material = mats.panelDark.clone(); kick.material.side = THREE.BackSide;
+  kick.material = new THREE.MeshStandardMaterial({ color: 0x2a2d31, map: mats.panelTex.map, normalMap: mats.panelTex.normal, roughnessMap: mats.panelTex.orm, roughness: 1, metalness: 0.2, side: THREE.BackSide });
   kick.position.y = floorY + 0.03; S.add(kick);
   const floorGlow = new THREE.Mesh(new THREE.TorusGeometry(Math.sqrt(R * R - floorY * floorY) - 0.05, 0.004, 4, 96), new THREE.MeshBasicMaterial({ color: 0x0a2a3a, toneMapped: false }));
   floorGlow.rotation.x = Math.PI / 2; floorGlow.position.y = floorY + 0.005; S.add(floorGlow);
   out.floorGlow = floorGlow;
 
   return out;
+}
+
+// Painted aluminium lining panel. Uses the baked photographic set (albedo / ORM / normal) plus:
+//  - per-panel brightness, wear and grime amounts (attribute ptint)
+//  - edge wear: paint rubbed to a glossier, slightly darker, dirtier band along the edges where
+//    panels are handled and dust collects in the seams (attribute edge, metres)
+//  - micro-roughness breakup so specular highlights are never uniform
+function panelMaterial(T, color, ports, key) {
+  const m = new THREE.MeshStandardMaterial({ color, map: T.map, normalMap: T.normal, roughnessMap: T.orm, aoMap: T.orm, roughness: 1, metalness: 0, aoMapIntensity: 1 });
+  m.normalScale.set(0.9, 0.9);
+  const discard = portDiscard(ports, 0.03);
+  m.onBeforeCompile = (sh) => {
+    discard(sh);
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float edge; attribute vec3 ptint; varying float vEdge; varying vec3 vPt;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvEdge = edge; vPt = ptint;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vEdge; varying vec3 vPt;')
+      .replace('#include <map_fragment>', `#include <map_fragment>
+        float edgeBand = 1.0 - smoothstep(0.004, 0.035, vEdge);     // ~3 cm band along the edges
+        float seam = 1.0 - smoothstep(0.0, 0.008, vEdge);           // dirt packed right at the seam
+        diffuseColor.rgb *= vPt.x;                                   // paint batch / fading
+        diffuseColor.rgb *= 1.0 - 0.10 * edgeBand * (0.4 + vPt.y) - 0.25 * seam;
+        diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(0.93, 0.9, 0.84), vPt.z * 0.5);`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        roughnessFactor = clamp(roughnessFactor - 0.12 * edgeBand * vPt.y + 0.08 * vPt.z, 0.12, 0.95);`);
+  };
+  m.customProgramCacheKey = () => 'lining-photo-' + key;
+  return m;
 }
 
 function placeOnWall(obj, d, r) {
