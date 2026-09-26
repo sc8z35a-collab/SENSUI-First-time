@@ -8,7 +8,7 @@ import * as THREE from 'three';
 
 export const water = {
   // extinction (absorption + scattering) per metre for the *view* path
-  sigma: new THREE.Vector3(0.26, 0.042, 0.028),
+  sigma: new THREE.Vector3(0.15, 0.048, 0.034), // effective for broadband white LEDs
   // diffuse attenuation of the down-welling sunlight per metre of depth
   kd: new THREE.Vector3(0.33, 0.042, 0.021),
   // colour of sun+sky light entering at the surface (linear HDR)

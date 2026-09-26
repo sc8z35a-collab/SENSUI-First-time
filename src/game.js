@@ -514,6 +514,9 @@ export class Game {
     this.hemi.color.setRGB(a.r, a.g, a.b); this.hemi.groundColor.setRGB(a.r * 0.1, a.g * 0.15, a.b * 0.2);
     this.sun.color.setRGB(a.r, a.g, a.b);
     this.sun.position.set(cam.position.x + 30, cam.position.y + 100, cam.position.z + 20); this.sun.target.position.copy(cam.position);
+    // particle scattering coefficient b (1/m): productive surface layer ~0.04, clear abyssal water ~0.012;
+    // hydrothermal plumes and stirred silt raise it again
+    this.pipe.params.scatB = 0.012 + 0.028 * Math.exp(-sub.depth / 350) + (this.env.ventHeat || 0) * 0.01;
     this.pipe.params.silt = THREE.MathUtils.clamp(sub.siltStir * 0.6 + (this.env.turbidity ? 0.4 : 0), 0, 1);
 
     this.ext.update(dt, t, { sub, sys, ap, lasers: this.lasers });
