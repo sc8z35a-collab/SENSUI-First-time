@@ -175,6 +175,52 @@ export class Cockpit {
       glass.renderOrder = 10;
       g.add(glass);
       this.glass.push(glassMat);
+      // thick PMMA frustum: the bevelled side wall of the acrylic seen through the bore
+      // (greenish body tint + bright total-internal-reflection band towards grazing angles)
+      const edgeMat = new THREE.ShaderMaterial({
+        transparent: true, depthWrite: false, side: THREE.BackSide,
+        uniforms: { uL: this._acrylicL || (this._acrylicL = { value: 1 }) },
+        vertexShader: `varying vec3 vN; varying vec3 vV; varying float vY;
+          void main(){ vec4 w = modelMatrix * vec4(position,1.0); vN = normalize(mat3(modelMatrix) * normal); vV = normalize(cameraPosition - w.xyz);
+            vY = uv.y; gl_Position = projectionMatrix * viewMatrix * w; }`,
+        fragmentShader: `varying vec3 vN; varying vec3 vV; varying float vY; uniform float uL;
+          void main(){ float g = 1.0 - abs(dot(normalize(vN), vV)); float tir = pow(g, 3.0);
+            float band = smoothstep(0.0, 0.15, vY) * smoothstep(1.0, 0.8, vY);
+            vec3 c = mix(vec3(0.05, 0.12, 0.11), vec3(0.55, 0.75, 0.72), tir) * uL;
+            gl_FragColor = vec4(c, (0.28 + tir * 0.45) * band); }`,
+      });
+      const acr = new THREE.Mesh(new THREE.CylinderGeometry(rOut * 0.975, rOut * 0.81, depth * 0.96, 64, 1, true), edgeMat);
+      acr.position.y = -depth / 2; acr.renderOrder = 9; g.add(acr);
+      // inner (cabin-side) face: fingerprints, wipe smears, fine scratches, faint cabin reflection
+      const innerMat = new THREE.ShaderMaterial({
+        transparent: true, depthWrite: false, side: THREE.DoubleSide,
+        uniforms: { uL: this._acrylicL, uSeed: { value: Math.random() * 10 } },
+        vertexShader: `varying vec2 vUv; varying vec3 vN; varying vec3 vV;
+          void main(){ vUv = uv; vec4 w = modelMatrix * vec4(position,1.0); vN = normalize(mat3(modelMatrix) * normal); vV = normalize(cameraPosition - w.xyz);
+            gl_Position = projectionMatrix * viewMatrix * w; }`,
+        fragmentShader: `varying vec2 vUv; varying vec3 vN; varying vec3 vV; uniform float uL; uniform float uSeed;
+          float h(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
+          float n(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+            return mix(mix(h(i), h(i+vec2(1,0)), f.x), mix(h(i+vec2(0,1)), h(i+vec2(1,1)), f.x), f.y); }
+          float fbm(vec2 p){ float a = 0.5, s = 0.0; for (int i = 0; i < 4; i++){ s += a * n(p); p *= 2.03; a *= 0.5; } return s; }
+          void main(){
+            vec2 p = vUv - 0.5; float r = length(p) * 2.0;
+            // smudge patches concentrated near the lower rim (where hands brace)
+            float sm = smoothstep(0.55, 0.8, fbm(p * 5.0 + uSeed)) * (0.35 + 0.65 * smoothstep(0.2, 0.9, r)) * (0.6 + 0.4 * smoothstep(0.2, -0.4, p.y));
+            // fingerprint ridges inside a few prints
+            vec2 fp = (p - vec2(0.28, -0.25)) * 60.0; float ridge = 0.5 + 0.5 * sin(length(fp * vec2(1.0, 0.8)) * 6.0);
+            float print = smoothstep(0.9, 0.3, length(p - vec2(0.28, -0.25)) * 14.0) * ridge;
+            // circular wipe marks + hairline scratches
+            float wipe = smoothstep(0.62, 0.7, fbm(vec2(atan(p.y, p.x) * 3.0, r * 40.0) + uSeed)) * 0.5;
+            float scr = smoothstep(0.985, 1.0, n(vec2(dot(p, vec2(0.8, 0.6)) * 900.0, p.y * 4.0 + uSeed))) * 0.7;
+            float fres = 0.04 + 0.96 * pow(1.0 - abs(dot(normalize(vN), vV)), 5.0);
+            float grime = sm * 0.55 + print * 0.5 + wipe * 0.3 + scr;
+            vec3 refl = vec3(0.95, 0.9, 0.82) * (fres * 0.35 + grime * 0.22) * uL;
+            float a = clamp(fres * 0.25 + grime * 0.16, 0.0, 0.5) * smoothstep(1.0, 0.94, r);
+            gl_FragColor = vec4(refl + vec3(0.02, 0.05, 0.05) * 0.4, a + 0.035); }`,
+      });
+      const inner = new THREE.Mesh(new THREE.CircleGeometry(rOut * 0.975, 64), innerMat);
+      inner.rotation.x = Math.PI / 2; inner.position.y = -0.012; inner.renderOrder = 11; g.add(inner);
       if (vp.main) this.mainVP = g;
     }
 
@@ -574,6 +620,7 @@ export class Cockpit {
     const L = cabinOn ? sys.lights.cabin : 0;
     const flick = sys.fire.active || (sub.floodL > 150) ? (Math.random() < 0.05 ? 0.2 : 1) : 1;
     for (const l of this.cabinLights) l.intensity = 1.2 * L * flick;
+    if (this._acrylicL) this._acrylicL.value = 0.08 + L * 2.2 * flick;
     for (const w of this.washers) { w.intensity = 1.6 * L * flick; w.userData.puck.material.color.setRGB(1, 0.94, 0.86).multiplyScalar(0.05 + L * 6 * flick); }
     this.keyLight.intensity = 3.5 * L * flick;
     this.stripMat.color.setRGB(1, 0.94, 0.86).multiplyScalar((0.1 + L * 2.4) * flick);
