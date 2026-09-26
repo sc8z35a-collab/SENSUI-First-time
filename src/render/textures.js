@@ -119,3 +119,42 @@ export async function paintedMaterial({ color = 0xe9e7e1, repeat = 4, rough = [0
   mat.normalScale.set(normalScale, normalScale);
   return mat;
 }
+
+// "Used object" surface: applies the baked photographic wear set (stipple normal, grime/stain albedo,
+// fingerprint/smear roughness breakup) to any MeshStandardMaterial via world-space triplanar
+// projection — so procedurally built props without UVs (bottles, frames, handles, cables) get
+// real-looking micro-surface instead of flat CG colour.
+//   scale: texture repeats per metre; wear: 0..1 amount of grime; gloss: base roughness offset
+export function weathered(mat, { scale = 3.5, wear = 0.6, normal = 0.8, key = 'w' } = {}) {
+  const T = { c: tex('wallpanel_color', { srgb: false }), o: tex('wallpanel_orm'), n: tex('wallpanel_normal') };
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (sh, r) => {
+    prev?.(sh, r);
+    sh.uniforms.tWC = { value: T.c }; sh.uniforms.tWO = { value: T.o }; sh.uniforms.tWN = { value: T.n };
+    sh.uniforms.uWS = { value: scale }; sh.uniforms.uWW = { value: wear }; sh.uniforms.uWN = { value: normal };
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vWP; varying vec3 vWN;')
+      .replace('#include <worldpos_vertex>', '#include <worldpos_vertex>\nvWP = (modelMatrix * vec4(transformed, 1.0)).xyz; vWN = normalize(mat3(modelMatrix) * objectNormal);');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', `#include <common>
+        uniform sampler2D tWC, tWO, tWN; uniform float uWS, uWW, uWN; varying vec3 vWP; varying vec3 vWN;
+        vec3 triW(){ vec3 w = pow(abs(normalize(vWN)), vec3(4.0)); return w / (w.x + w.y + w.z); }
+        vec4 tri(sampler2D t){ vec3 w = triW(); vec3 p = vWP * uWS; return texture2D(t, p.zy) * w.x + texture2D(t, p.xz) * w.y + texture2D(t, p.xy) * w.z; }`)
+      .replace('#include <map_fragment>', `#include <map_fragment>
+        vec3 wc = tri(tWC).rgb; // linear-ish grime/stain luminance around ~0.85
+        diffuseColor.rgb *= mix(vec3(1.0), wc / 0.85, uWW);`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        vec4 wo = tri(tWO);
+        roughnessFactor = clamp(mix(roughnessFactor, roughnessFactor * (0.6 + wo.g * 1.1), uWW), 0.05, 1.0);`)
+      .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+        {
+          vec3 tn = tri(tWN).xyz * 2.0 - 1.0;
+          // perturb the view-space normal with the tangent-less triplanar detail (small-angle approx)
+          vec3 dn = (viewMatrix * vec4(tn.x, tn.y, 0.0, 0.0)).xyz;
+          normal = normalize(normal + dn * uWN * 0.6);
+        }`);
+  };
+  const k = mat.customProgramCacheKey?.bind(mat);
+  mat.customProgramCacheKey = () => (k ? k() : '') + '|weathered-' + key;
+  return mat;
+}

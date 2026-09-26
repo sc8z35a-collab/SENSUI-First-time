@@ -4,7 +4,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { pbrMaterial, paintedMaterial, tex } from '../render/textures.js';
+import { pbrMaterial, paintedMaterial, weathered, tex } from '../render/textures.js';
 import { canvasTexture, placard, FONT, MONO } from './canvasTex.js';
 import { BREAKERS } from '../sim/systems.js';
 import { buildOutfit } from './outfit.js';
@@ -73,15 +73,15 @@ export class Cockpit {
       pbrMaterial('hull', { repeat: 2, metal: true, color: 0x9aa0a6 }),
     ]);
     this.mats = { paint, brushed, leather, grate, floor, rust, hullM };
-    const darkMetal = new THREE.MeshStandardMaterial({ color: 0x1c1f23, metalness: 0.7, roughness: 0.42 });
-    const black = new THREE.MeshStandardMaterial({ color: 0x0b0c0e, metalness: 0.2, roughness: 0.55 });
+    const darkMetal = weathered(new THREE.MeshStandardMaterial({ color: 0x1c1f23, metalness: 0.7, roughness: 0.42 }), { scale: 5, wear: 0.5, key: 'dm' });
+    const black = weathered(new THREE.MeshStandardMaterial({ color: 0x0b0c0e, metalness: 0.2, roughness: 0.55 }), { scale: 6, wear: 0.4, key: 'bk' });
     const blackRubber = new THREE.MeshStandardMaterial({ color: 0x08090a, roughness: 0.9 });
     const titanium = brushed.clone(); titanium.color.set(0xa7a39a); titanium.roughness = 0.9;
-    const yellow = new THREE.MeshStandardMaterial({ color: 0xf2b400, roughness: 0.45, metalness: 0.1 });
-    const red = new THREE.MeshStandardMaterial({ color: 0xb3120f, roughness: 0.35, metalness: 0.2 });
-    const green = new THREE.MeshStandardMaterial({ color: 0x1f6a3a, roughness: 0.4, metalness: 0.3 });
-    const cable = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.6 });
-    const cableOr = new THREE.MeshStandardMaterial({ color: 0xc2561a, roughness: 0.55 });
+    const yellow = weathered(new THREE.MeshStandardMaterial({ color: 0xe0a800, roughness: 0.45, metalness: 0.1 }), { scale: 6, wear: 0.9, key: 'ye' });
+    const red = weathered(new THREE.MeshStandardMaterial({ color: 0xa3110e, roughness: 0.35, metalness: 0.2 }), { scale: 5, wear: 0.9, key: 're' });
+    const green = weathered(new THREE.MeshStandardMaterial({ color: 0x1d5f36, roughness: 0.4, metalness: 0.3 }), { scale: 4, wear: 1.0, key: 'gr' });
+    const cable = weathered(new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.6 }), { scale: 12, wear: 0.5, key: 'cb' });
+    const cableOr = weathered(new THREE.MeshStandardMaterial({ color: 0xb04c16, roughness: 0.55 }), { scale: 12, wear: 0.8, key: 'co' });
     const copper = new THREE.MeshStandardMaterial({ color: 0xb87333, metalness: 1, roughness: 0.3 });
     this.darkMetal = darkMetal;
 
