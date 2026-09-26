@@ -28,13 +28,16 @@ class Stick {
   }
   home() {
     const h = innerHeight, w = innerWidth;
-    this.R = Math.min(78, h * 0.16);
-    this.hx = this.side === 'l' ? w * 0.13 + 20 : w * 0.87 - 20; this.hy = h * 0.72;
-    this._place(this.hx, this.hy);
+    this.R = Math.round(Math.max(44, Math.min(70, h * 0.15)));
+    // clear of the side button columns (~62 px) and the bottom edge / gesture bar
+    const inset = 62 + this.R + 14;
+    this.hx = this.side === 'l' ? inset : w - inset;
+    this.hy = h - this.R - 26;
+    if (this.id === null) this._place(this.hx, this.hy);
     this.el.style.setProperty('--R', this.R + 'px');
   }
   _place(x, y) { this.ox = x; this.oy = y; this.el.style.transform = `translate(${x}px, ${y}px)`; }
-  down(e) { this.id = e.pointerId; this._place(e.clientX, e.clientY); this.x = this.y = 0; this._knob(); this.el.classList.add('active'); }
+  down(e) { this.id = e.pointerId; this.moved = false; this._place(e.clientX, e.clientY); this.x = this.y = 0; this._knob(); this.el.classList.add('active'); }
   move(e) {
     let dx = e.clientX - this.ox, dy = e.clientY - this.oy;
     const L = Math.hypot(dx, dy);
@@ -66,10 +69,12 @@ export class Controls {
     this.rocker.className = 'rocker';
     this.rocker.innerHTML = '<button data-h="1" aria-label="上昇">▲<small>UP</small></button><button data-h="-1" aria-label="下降">▼<small>DN</small></button>';
     this.layer.appendChild(this.rocker);
+    this._placeRocker();
     this.heaveBtn = 0;
     for (const b of this.rocker.querySelectorAll('button')) {
       const h = +b.dataset.h;
-      b.addEventListener('pointerdown', (e) => { e.stopPropagation(); b.setPointerCapture(e.pointerId); this.heaveBtn = h; b.classList.add('on'); navigator.vibrate?.(8); });
+      b.addEventListener('pointerdown', (e) => { e.stopPropagation(); e.preventDefault(); try { b.setPointerCapture(e.pointerId); } catch { /* ignore */ } this.heaveBtn = h; b.classList.add('on'); navigator.vibrate?.(8); });
+      b.addEventListener('contextmenu', (e) => e.preventDefault());
       const rel = () => { if (this.heaveBtn === h) this.heaveBtn = 0; b.classList.remove('on'); };
       b.addEventListener('pointerup', rel); b.addEventListener('pointercancel', rel); b.addEventListener('lostpointercapture', rel);
     }
@@ -83,26 +88,44 @@ export class Controls {
     el.addEventListener('pointerdown', (e) => this._down(e), { passive: false });
     el.addEventListener('pointermove', (e) => this._move(e), { passive: false });
     el.addEventListener('pointerup', (e) => this._up(e));
-    el.addEventListener('pointercancel', (e) => this._up(e));
-    addEventListener('resize', () => { this.left.home(); this.right.home(); });
+    el.addEventListener('pointercancel', (e) => this._up(e, true));
+    el.addEventListener('lostpointercapture', (e) => this._up(e, true));
+    el.addEventListener('contextmenu', (e) => e.preventDefault());
+    const rehome = () => { this.left.home(); this.right.home(); this._placeRocker(); };
+    addEventListener('resize', rehome);
+    addEventListener('orientationchange', () => setTimeout(rehome, 250));
+    document.addEventListener('fullscreenchange', () => setTimeout(rehome, 100));
     // keyboard for desktop testing only
     this.keys = new Set();
     addEventListener('keydown', (e) => this.keys.add(e.code));
     addEventListener('keyup', (e) => this.keys.delete(e.code));
-    addEventListener('blur', () => { this.keys.clear(); this.left.up(); this.right.up(); this.look.id = null; this.heaveBtn = 0; });
+    addEventListener('blur', () => this.reset());
+    document.addEventListener('visibilitychange', () => { if (document.hidden) this.reset(); });
+  }
+  // release everything (app switch, panel open, game over) so no thruster stays latched
+  reset() {
+    this.keys.clear(); this.left.up(); this.right.up(); this.look.id = null; this.heaveBtn = 0;
+    for (const b of this.rocker.querySelectorAll('button')) b.classList.remove('on');
+  }
+  _placeRocker() {
+    // just inside the right stick, above its home position
+    const r = this.right, w = 50;
+    const x = Math.max(innerWidth * 0.55, r.hx - r.R - w - 18), y = Math.max(innerHeight * 0.36, r.hy - 50 - 3);
+    this.rocker.style.transform = `translate(${Math.round(x)}px, ${Math.round(y - 50)}px)`;
   }
 
-  _zone(x) { const w = innerWidth; return x < w * 0.3 ? 'l' : x > w * 0.7 ? 'r' : 'c'; }
+  _zone(x) { const w = innerWidth; return x < w * 0.32 ? 'l' : x > w * 0.68 ? 'r' : 'c'; }
+  _cap(e) { try { this.layer.setPointerCapture(e.pointerId); } catch { /* pointer already gone */ } }
   _down(e) {
     if (!this.enabled) return;
     e.preventDefault();
     const z = this._zone(e.clientX);
-    const lower = e.clientY > innerHeight * 0.34;
-    if (z === 'l' && lower && this.left.id === null) { this.left.down(e); this.layer.setPointerCapture(e.pointerId); return; }
-    if (z === 'r' && lower && this.right.id === null) { this.right.down(e); this.layer.setPointerCapture(e.pointerId); return; }
+    const lower = e.clientY > innerHeight * 0.4;
+    if (z === 'l' && lower && this.left.id === null) { this.left.down(e); this._cap(e); return; }
+    if (z === 'r' && lower && this.right.id === null) { this.right.down(e); this._cap(e); return; }
     if (this.look.id === null) {
       const L = this.look; L.id = e.pointerId; L.lx = L.sx = e.clientX; L.ly = L.sy = e.clientY; L.t0 = performance.now(); L.moved = 0;
-      this.layer.setPointerCapture(e.pointerId);
+      this._cap(e);
     }
   }
   _move(e) {
@@ -118,13 +141,13 @@ export class Controls {
       this.onLook?.();
     }
   }
-  _up(e) {
+  _up(e, cancel = false) {
     if (e.pointerId === this.left.id) return this.left.up();
     if (e.pointerId === this.right.id) return this.right.up();
     const L = this.look;
     if (e.pointerId === L.id) {
       L.id = null;
-      if (L.moved < 12 && performance.now() - L.t0 < 350) this.onTap?.(e.clientX, e.clientY);
+      if (!cancel && L.moved < 14 && performance.now() - L.t0 < 400) this.onTap?.(e.clientX, e.clientY);
     }
   }
   recenter() { this.look.yaw = 0; this.look.pitch = 0; }
@@ -137,7 +160,7 @@ export class Controls {
     const surge = clamp(this.left.y + kb('KeyW', 'KeyS'), -1, 1) * p;
     const yaw = clamp(this.left.x + kb('KeyD', 'KeyA'), -1, 1) * p;
     const sway = clamp(this.right.x + kb('KeyE', 'KeyQ'), -1, 1) * p;
-    const heave = clamp(this.right.y + this.heaveBtn + kb('KeyR', 'KeyF'), -1, 1) * p;
+    const heave = clamp(this.right.y + this.heaveBtn + kb('KeyR', 'KeyF'), -1, 1) * (this.heaveBtn && !this.right.y ? 1 : p);
     return { surge, yaw, sway, heave };
   }
   get active() { return this.left.id !== null || this.right.id !== null || this.heaveBtn !== 0 || this.keys.size > 0; }
