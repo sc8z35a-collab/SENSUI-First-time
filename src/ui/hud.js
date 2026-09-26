@@ -18,6 +18,7 @@ export class HUD {
     this.root = root;
     this.panel = null;
     this._t = 0;
+    this._holds = new Set();
     this._build();
   }
 
@@ -32,16 +33,18 @@ export class HUD {
   _build() {
     const R = this.root;
     // ---------------------------------------------------------------- top bar
+    const L = (this.layer = h('div', 'hud-layer'));
+    R.appendChild(L);
     const top = (this.top = h('div', 'hud-top'));
     top.innerHTML = `
-      <div class="ht-block ht-depth"><span class="k">深度 DEPTH</span><span class="v" id="hDepth">0</span><span class="u">m</span><span class="sub" id="hVz"></span></div>
-      <div class="ht-block"><span class="k">方位 HDG</span><span class="v s" id="hHdg">000</span><span class="u">°</span></div>
-      <div class="ht-block"><span class="k">速力 SPD</span><span class="v s" id="hSpd">0.0</span><span class="u">kt</span></div>
-      <div class="ht-block"><span class="k">高度 ALT</span><span class="v s" id="hAlt">---</span><span class="u">m</span></div>
-      <div class="ht-block"><span class="k">浮力 BUOY</span><span class="v s" id="hBuoy">0</span><span class="u">kg</span></div>
+      <div class="ht-block ht-depth"><div class="dcol"><span class="k">深度 DEPTH</span><span class="v" id="hDepth">0</span></div><span class="sub" id="hVz"></span><span class="u">m</span></div>
+      <div class="ht-block ht-small"><span class="k">方位 HDG</span><span class="v s" id="hHdg">000</span><span class="u">°</span></div>
+      <div class="ht-block ht-small"><span class="k">速力 SPD</span><span class="v s" id="hSpd">0.0</span><span class="u">kt</span></div>
+      <div class="ht-block ht-small"><span class="k">高度 ALT</span><span class="v s" id="hAlt">---</span><span class="u">m</span></div>
+      <div class="ht-block ht-small ht-hide-s"><span class="k">浮力 BUOY</span><span class="v s" id="hBuoy">0</span><span class="u">kg</span></div>
       <div class="ht-block ht-ap" id="hAp"><span class="k">AUTOPILOT</span><span class="v s" id="hApS">MANUAL</span></div>
       <div class="ht-block ht-zone"><span class="k" id="hZone"></span><span class="sub" id="hEnv"></span></div>`;
-    R.appendChild(top);
+    L.appendChild(top);
     this.el = {};
     for (const id of ['hDepth', 'hVz', 'hHdg', 'hSpd', 'hAlt', 'hBuoy', 'hAp', 'hApS', 'hZone', 'hEnv']) this.el[id] = top.querySelector('#' + id);
 
@@ -51,7 +54,7 @@ export class HUD {
     for (const [id, lbl] of [['ap', 'AP<small>自動操縦</small>'], ['dc', 'DC<small>ダメコン</small>'], ['sys', 'SYS<small>システム</small>'], ['nav', 'NAV<small>航法</small>'], ['log', 'LOG<small>記録</small>']]) {
       this.tabBtns[id] = this._btn(tabs, lbl, () => this.toggle(id), 'tab');
     }
-    R.appendChild(tabs);
+    L.appendChild(tabs);
 
     // ---------------------------------------------------------------- left quick column (lights / ballast / camera)
     const q = (this.quick = h('div', 'hud-quick'));
@@ -60,53 +63,59 @@ export class HUD {
     this.qPump = this._hold(q, '排水<small>VBT−</small>', (on) => this.g.vbtManual(on ? -1 : 0), 'amber');
     this.qFine = this._btn(q, '微速<small>FINE</small>', (e, b) => { this.g.controls.precision = !this.g.controls.precision; });
     this.qView = this._btn(q, '◎<small>視点</small>', () => this.g.controls.recenter());
-    R.appendChild(q);
+    this.qFs = this._btn(q, '⛶<small>全画面</small>', () => this.g.requestFullscreen(), 'fs');
+    L.appendChild(q);
 
     // ---------------------------------------------------------------- caution / warning banner
     this.banner = h('div', 'hud-banner');
     this.banner.addEventListener('click', (e) => { e.stopPropagation(); this.g.audio.klaxonMuted = true; this.open('dc'); });
-    R.appendChild(this.banner);
+    L.appendChild(this.banner);
     // message ticker
     this.ticker = h('div', 'hud-ticker');
-    R.appendChild(this.ticker);
+    L.appendChild(this.ticker);
     // repair progress
     this.repairBar = h('div', 'hud-repair', '<div class="rb-l"></div><div class="rb-bar"><i></i></div><button class="hb sm">中止</button>');
     this.repairBar.querySelector('button').addEventListener('click', (e) => { e.stopPropagation(); this.g.inc.cancelRepair(); });
-    R.appendChild(this.repairBar);
+    this.rbL = this.repairBar.querySelector('.rb-l'); this.rbI = this.repairBar.querySelector('i');
+    L.appendChild(this.repairBar);
     // time compression indicator
     this.tc = h('div', 'hud-tc');
-    R.appendChild(this.tc);
+    L.appendChild(this.tc);
     // crosshair (for cockpit tap targeting)
     this.reticle = h('div', 'hud-reticle');
-    R.appendChild(this.reticle);
+    L.appendChild(this.reticle);
     // pilot vision effects (hypoxia tunnel, CO2 blur)
     this.vision = h('div', 'hud-vision');
-    R.appendChild(this.vision);
+    L.appendChild(this.vision);
 
     // ---------------------------------------------------------------- panel container
     this.pan = h('div', 'hud-panel');
     this.pan.addEventListener('pointerdown', (e) => e.stopPropagation());
     this.pan.addEventListener('pointermove', (e) => e.stopPropagation());
-    R.appendChild(this.pan);
+    L.appendChild(this.pan);
   }
 
   _hold(parent, label, fn, cls = '') {
     const b = h('button', 'hb ' + cls, label);
-    const on = (e) => { e.stopPropagation(); e.preventDefault(); b.setPointerCapture?.(e.pointerId); b.classList.add('on'); fn(true); navigator.vibrate?.(8); };
-    const off = () => { if (!b.classList.contains('on')) return; b.classList.remove('on'); fn(false); };
+    const on = (e) => { e.stopPropagation(); e.preventDefault(); try { b.setPointerCapture?.(e.pointerId); } catch { /* ignore */ } b.classList.add('on'); fn(true); this._holds.add(off); navigator.vibrate?.(8); };
+    const off = () => { this._holds.delete(off); if (!b.classList.contains('on')) return; b.classList.remove('on'); fn(false); };
     b.addEventListener('pointerdown', on); b.addEventListener('pointerup', off); b.addEventListener('pointercancel', off); b.addEventListener('lostpointercapture', off);
+    b.addEventListener('contextmenu', (e) => e.preventDefault());
     parent.appendChild(b);
     return b;
   }
+  releaseHolds() { for (const off of [...this._holds]) off(); }
 
   toggle(id) { if (this.panel === id) this.close(); else this.open(id); }
   open(id) {
+    if (this.panel !== id) this.releaseHolds();
+    this.g.controls?.reset();
     this.panel = id;
     this.pan.className = 'hud-panel open p-' + id;
     for (const k in this.tabBtns) this.tabBtns[k].classList.toggle('on', k === id);
     this._render(true);
   }
-  close() { this.panel = null; this.pan.className = 'hud-panel'; for (const k in this.tabBtns) this.tabBtns[k].classList.remove('on'); }
+  close() { this.releaseHolds(); this.panel = null; this._key = null; this.pan.className = 'hud-panel'; this.pan.innerHTML = ''; this._lives?.clear(); for (const k in this.tabBtns) this.tabBtns[k].classList.remove('on'); }
 
   // ---------------------------------------------------------------- per-frame
   update(dt) {
@@ -148,8 +157,9 @@ export class HUD {
     if (inc.repair) {
       const R = inc.repair;
       this.repairBar.classList.add('show');
-      this.repairBar.querySelector('.rb-l').textContent = `作業中: ${R.proc.label}`;
-      this.repairBar.querySelector('i').style.width = `${(R.t / R.proc.time) * 100}%`;
+      const lbl = `作業中: ${R.proc.label}`;
+      if (this._rbl !== lbl) { this.rbL.textContent = lbl; this._rbl = lbl; }
+      this.rbI.style.width = `${Math.min(100, (R.t / R.proc.time) * 100).toFixed(1)}%`;
     } else this.repairBar.classList.remove('show');
 
     this.tc.textContent = g.timeScale > 1 ? `▶▶ ×${g.timeScale}` : '';
@@ -182,6 +192,9 @@ export class HUD {
     const key = fn.call(this, null);
     if (force || key !== this._key) {
       this._key = key;
+      this.releaseHolds();
+      const sc = this.pan.querySelector('.pn-body')?.scrollTop || 0; // keep scroll position across rebuilds
+      this._lives?.clear();
       this.pan.innerHTML = '';
       const hdr = h('div', 'pn-hdr');
       hdr.innerHTML = `<b>${{ ap: 'AUTOPILOT 自動操縦', dc: 'DAMAGE CONTROL ダメージコントロール', sys: 'SYSTEMS 電力・生命維持・バラスト', nav: 'NAVIGATION 航法・目的地', log: 'LOG 航海記録・生物図鑑' }[id]}</b>`;
@@ -189,6 +202,8 @@ export class HUD {
       this.pan.appendChild(hdr);
       const body = h('div', 'pn-body'); this.pan.appendChild(body);
       fn.call(this, body);
+      this._patch();
+      if (!force) body.scrollTop = sc;
     } else fn.call(this, undefined);
   }
 
