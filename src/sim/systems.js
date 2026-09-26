@@ -71,7 +71,7 @@ export class Systems {
   }
   powered(id) {
     const b = this.breakers[id];
-    if (!b.closed || b.tripped) return false;
+    if (!b || !b.closed || b.tripped) return false;
     const bus = this.busOK;
     if (b.bus === 'E') return bus.E || bus.A || bus.B;
     return bus[b.bus];
@@ -91,7 +91,8 @@ export class Systems {
     // ------------------------------------------------ electrical loads
     const L = this.loads;
     const pw = (id) => this.powered(id);
-    sub.powerAvail = pw('PROP') ? clamp(0.25 + 0.75 * Math.min(this.bat.A.soc, 1) / 0.25, 0, 1) * (this.bat.A.online || this.cross ? 1 : 0) : 0;
+    const propSoc = this.bat.A.online ? this.bat.A.soc : this.cross && this.bat.B.online ? this.bat.B.soc : 0;
+    sub.powerAvail = pw('PROP') ? clamp(0.25 + 0.75 * propSoc / 0.25, 0, 1) * (propSoc > 0 ? 1 : 0) : 0;
     L.PROP = pw('PROP') ? sub.thrPower : 0;
     L.LIGHT = pw('LIGHT') ? (this.lights.main * 2 * 450 + this.lights.flood * 4 * 180) : 0;
     L.HYD = pw('HYD') ? 250 + (sub.vbtPumpW || 0) + (Math.abs(sub.trimCmd) > 0.01 ? 900 : 0) : 0;
@@ -136,7 +137,7 @@ export class Systems {
     // structural collapse
     const crushMargin = SPEC.crushDepth * (1 - H.fatigue * 3 - (1 - H.integrity) * 0.5 - H.crack * 0.3);
     if (depth > crushMargin && !this.dead) this.dead = 'implosion';
-    if (depth > SPEC.designDepth * 1.02) H.integrity -= dt * 0.002 * (depth / SPEC.designDepth - 1) * 40;
+    if (depth > SPEC.designDepth * 1.02) H.integrity = Math.max(0, H.integrity - dt * 0.002 * (depth / SPEC.designDepth - 1) * 40);
 
     // ------------------------------------------------ leaks / flooding
     let inflow = 0;
@@ -254,13 +255,14 @@ export class Systems {
   // ------------------------------------------------ crew actions
   toggleBreaker(id) {
     const b = this.breakers[id];
+    if (!b) return;
     if (b.tripped) { b.tripped = false; b.closed = true; this.msg(`${b.name} ブレーカー リセット`); return; }
     b.closed = !b.closed;
     this.msg(`${b.name} ブレーカー ${b.closed ? '投入' : '開放'}`);
   }
   isolate(id) {
     const p = this.pen[id];
-    if (id === 'VP' || id === 'HATCH') return false;
+    if (!p || id === 'VP' || id === 'HATCH') return false;
     p.isolated = !p.isolated;
     for (const f of p.feeds) { if (p.isolated) this.breakers[f].closed = false; }
     this.msg(`${p.name} ${p.isolated ? '遮断弁 閉' : '遮断弁 開'}`, p.isolated ? 'warn' : 'info');
@@ -285,7 +287,7 @@ export class Systems {
     this.scrubber.spare--; this.scrubber.canister = 1; this.msg('CO2吸収キャニスター交換完了');
   }
   toggleMask() {
-    if (!this.emergencyMask && this.emergencyO2 <= 0) this.emergencyO2 = this.emergencyO2 === 0 && !this._maskUsed ? 1.5 : 0;
+    if (!this.emergencyMask && this.emergencyO2 <= 0 && !this._maskUsed) this.emergencyO2 = 1.5;
     if (!this.emergencyMask && this.emergencyO2 <= 0) { this.msg('緊急呼吸器は使い切った', 'warn'); return; }
     this._maskUsed = true;
     this.emergencyMask = !this.emergencyMask;
@@ -294,7 +296,7 @@ export class Systems {
 
   serialize() {
     const o = {};
-    for (const k of ['o2', 'co2', 'cabinT', 'rh', 'o2Bottles', 'o2Flow', 'cross', 'emergencyO2', '_maskUsed', 'pilotHealth']) o[k] = this[k];
+    for (const k of ['o2', 'co2', 'cabinT', 'rh', 'o2Bottles', 'o2Flow', 'cross', 'emergencyO2', '_maskUsed', 'pilotHealth', 'o2RegOK']) o[k] = this[k];
     o.bat = JSON.parse(JSON.stringify(this.bat));
     o.hull = { ...this.hull };
     o.scrubber = { ...this.scrubber };
@@ -307,10 +309,11 @@ export class Systems {
   }
   restore(o) {
     for (const k of ['o2', 'co2', 'cabinT', 'rh', 'o2Bottles', 'o2Flow', 'cross', 'emergencyO2', '_maskUsed', 'pilotHealth']) if (o[k] !== undefined) this[k] = o[k];
-    Object.assign(this.bat.A, o.bat.A); Object.assign(this.bat.B, o.bat.B); Object.assign(this.bat.E, o.bat.E);
-    Object.assign(this.hull, o.hull); Object.assign(this.scrubber, o.scrubber); Object.assign(this.lights, o.lights);
-    for (const k in o.breakers) Object.assign(this.breakers[k], o.breakers[k]);
-    for (const k in o.pen) Object.assign(this.pen[k], o.pen[k]);
-    Object.assign(this.fire, o.fire); Object.assign(this.sensors, o.sensors);
+    if (o.bat) for (const n of ['A', 'B', 'E']) if (o.bat[n]) Object.assign(this.bat[n], o.bat[n]);
+    Object.assign(this.hull, o.hull || {}); Object.assign(this.scrubber, o.scrubber || {}); Object.assign(this.lights, o.lights || {});
+    for (const k in o.breakers || {}) if (this.breakers[k]) Object.assign(this.breakers[k], o.breakers[k]);
+    for (const k in o.pen || {}) if (this.pen[k]) Object.assign(this.pen[k], o.pen[k]);
+    Object.assign(this.fire, o.fire || {}); Object.assign(this.sensors, o.sensors || {});
+    if (o.o2RegOK !== undefined) this.o2RegOK = o.o2RegOK;
   }
 }

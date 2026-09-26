@@ -178,8 +178,8 @@ const CATALOGUE = [
   },
   {
     id: 'entangle', w: 0.25, minDepth: 0, near: ['wreck', 'destroyer', 'lander'], apply(c) {
-      const t = pick(c.sub.thr.filter((t) => t.id === 'T1' || t.id === 'T2' || t.id === 'T4'));
-      if (t.jam > 0) return null;
+      const t = pick(c.sub.thr.filter((t) => (t.id === 'T1' || t.id === 'T2' || t.id === 'T4') && !(t.jam > 0)));
+      if (!t || c.sub.tether) return null;
       t.jam = 0.7;
       c.sub.extraMass += 0;
       c.sub.tether = { anchor: c.sub.pos.clone(), len: 6 + rnd() * 4, strength: 0.6 };
@@ -344,12 +344,12 @@ export class Incidents {
       if (t.fault === 'thermal' && t.temp < 55) { t.fault = null; this.resolveWhere((f) => f.target === t.id && f.en.includes('THERMAL')); sys.msg(`${t.name}スラスター 冷却完了・復帰`); }
     }
     // hydrothermal vent heat
-    const vents = POIS.find((p) => p.id === 'vents');
-    const dv = Math.hypot(sub.pos.x - vents.x, sub.pos.z - vents.z);
+    const vents = (this._vents ||= POIS.find((p) => p.id === 'vents'));
+    const dv = vents ? Math.hypot(sub.pos.x - vents.x, sub.pos.z - vents.z) : 1e9;
     if (dv < 60 && sub.pos.y < vents.y + 60) {
       env.ventHeat = Math.max(0, 1 - dv / 60);
       if (env.ventHeat > 0.75 && rnd() < dt * 0.3) {
-        sys.hull.integrity -= 0.01;
+        sys.hull.integrity = Math.max(0, sys.hull.integrity - 0.01);
         if (!this.active.find((f) => f.kind === 'heat' && !f.resolved)) this.raise({ kind: 'heat', target: 'hull', sev: 2, title: '外殻温度 異常上昇 — 熱水噴出孔に近すぎる', en: 'HULL OVERTEMP', sfx: 'alarm' });
       }
     } else env.ventHeat = 0;
@@ -386,6 +386,7 @@ export class Incidents {
     // ---- repair in progress
     if (this.repair) {
       const R = this.repair;
+      if (R.fault.resolved && R.proc.id !== 'mask') { this.repair = null; return; }
       R.t += dt;
       if (R.t >= R.proc.time) { this._apply(R.fault, R.proc.id); this.repair = null; }
     }
@@ -421,15 +422,15 @@ export class Incidents {
         if (t.fault === 'degraded' && rnd() < 0.7) { sys.msg(`${t.name} 軸受の異音は消えない (出力制限継続)`, 'warn'); break; }
         t.fault = null; t.temp = Math.min(t.temp, 60); f.resolved = true; ok(`${t.name} スラスター 復帰`); break;
       }
-      case 'disable': { const t = sub.thr.find((x) => x.id === f.target); t.enabled = !t.enabled; ok(`${t.name} ${t.enabled ? '再接続' : '切り離し'}`); if (!t.enabled && t.fault === 'thermal') {} break; }
+      case 'disable': { const t = sub.thr.find((x) => x.id === f.target); if (!t) break; t.enabled = !t.enabled; if (!t.enabled) f.resolved = true; ok(`${t.name} ${t.enabled ? '再接続' : '切り離し'}`); break; }
       case 'shake': if (sub.tether) { sub.tether.strength -= 0.35 + rnd() * 0.3; sub.w.y += (rnd() - 0.5) * 0.25; if (sub.tether.strength <= 0) { this._freeTether(); ok('網を振りほどいた！'); } else sys.msg('まだ絡まっている — 繰り返せ', 'warn'); } else f.resolved = true; break;
-      case 'jettison': this._freeTether(); sub.extraMass -= 0; sub.manipulatorLost = true; ok('マニピュレーター投棄 — 離脱成功'); break;
+      case 'jettison': this._freeTether(); sub.manipulatorLost = true; f.resolved = true; ok('マニピュレーター投棄 — 離脱成功'); break;
       case 'resetBreaker': {
         const b = sys.breakers[f.target];
         if (sub.floodL > 200 && rnd() < 0.6) { sys.msg(`${b.name}: 地絡継続中 — 再トリップ`, 'warn'); break; }
         b.tripped = false; b.closed = true; f.resolved = true; ok(`${b.name} 復電`); break;
       }
-      case 'shed': sub.thrustLimit = 0.5; ok('推進出力を50%に制限'); break;
+      case 'shed': sub.thrustLimit = 0.5; if (sys.bat[f.target]) sys.bat[f.target].temp -= 4; ok('推進出力を50%に制限'); break;
       case 'isolateBat': { const b = sys.bat[f.target]; b.online = false; sys.cross = true; f.resolved = true; ok(`バッテリー${f.target} 切り離し、クロスタイ投入`); break; }
       case 'balance': { const b = sys.bat[f.target]; if (b.fault === 'thermal' && rnd() < 0.5) { sys.msg('熱暴走は止まらない — 切り離せ！', 'alarm'); break; } b.fault = null; b.soc *= 0.94; f.resolved = true; ok('セルバランス完了'); break; }
       case 'extinguish': sys.extinguish(); break;

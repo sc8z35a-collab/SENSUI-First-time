@@ -14,7 +14,7 @@ class PID {
   reset() { this.i = 0; this.prev = null; }
   step(err, dt, dErr = null) {
     this.i = THREE.MathUtils.clamp(this.i + err * dt * this.ki, -this.ilim, this.ilim);
-    const d = dErr !== null ? dErr : this.prev === null ? 0 : (err - this.prev) / dt;
+    const d = dErr !== null ? dErr : this.prev === null || dt <= 0 ? 0 : (err - this.prev) / dt;
     this.prev = err;
     return THREE.MathUtils.clamp(this.kp * err + this.i + this.kd * d, -this.lim, this.lim);
   }
@@ -50,6 +50,7 @@ export class Autopilot {
 
   engage(on = !this.engaged) {
     this.engaged = on;
+    if (!on) { this._navVert = false; this.sub.vbtCmd = 0; }
     if (on) {
       const s = this.sub;
       if (!this.hdg.on && !this.nav.on && !this.station.on) { this.hdg.on = true; this.hdg.target = heading(s.yaw); }
@@ -64,8 +65,10 @@ export class Autopilot {
     // exclusivity for vertical modes
     if (on && ['depth', 'alt', 'descent', 'ascent'].includes(axis)) for (const k of ['depth', 'alt', 'descent', 'ascent']) if (k !== axis) this[k].on = false;
     if (on && ['hdg', 'nav', 'station'].includes(axis)) for (const k of ['hdg', 'nav', 'station']) if (k !== axis) this[k].on = false;
-    if (axis === 'station' && on) this.station.point.copy(this.sub.pos);
+    if (axis === 'station' && on) { this.station.point.copy(this.sub.pos); if (!this.hdg.on) this.hdg.target = Math.round(heading(this.sub.yaw)); }
     if (on) this.engaged = true;
+    if (on && axis !== 'nav' && ['depth', 'alt', 'descent', 'ascent'].includes(axis)) this._navVert = false;
+    if (axis === 'nav' && !on) this._navVert = false;
     this.pid.depth.reset(); this.pid.vz.reset();
   }
   navTo(poi) {
@@ -86,7 +89,7 @@ export class Autopilot {
     const s = this.sub, sen = this.sys.sensors;
     const m = {};
     m.depth = s.depth + sen.depthDrift;
-    m.hdg = heading(s.yaw) + (sen.gyro ? 0 : Math.sin(s.time * 0.05) * 25 + sen.gyroDrift * 57);
+    m.hdg = ((heading(s.yaw) + (sen.gyro ? 0 : Math.sin(s.time * 0.05) * 25 + sen.gyroDrift * 57)) % 360 + 360) % 360;
     m.yaw = s.yaw - (sen.gyro ? 0 : (Math.sin(s.time * 0.05) * 25 * Math.PI) / 180 + sen.gyroDrift);
     const dvlOK = sen.dvl && this.sys.powered('SONAR');
     m.dvl = dvlOK && s.altitude < 200;
@@ -166,7 +169,7 @@ export class Autopilot {
     const out = { surge: pilotInput.surge, yaw: pilotInput.yaw, heave: pilotInput.heave, sway: pilotInput.sway, pitch: 0 };
     this.warn = '';
     const navPower = sys.powered('NAV');
-    if (!navPower && this.engaged) { this.engaged = false; sys.msg('航法コンピュータ電源喪失 — 自動操縦 解除', 'alarm'); }
+    if (!navPower && this.engaged) { this.engaged = false; this.nav.on = false; this._navVert = false; sys.msg('航法コンピュータ電源喪失 — 自動操縦 解除', 'alarm'); }
     if (!this.engaged) {
       this.status = 'STBY';
       // pitch stabiliser (always-on SAS) via vertical thrusters
@@ -188,6 +191,7 @@ export class Autopilot {
       // speed schedule: slow down on approach
       const vmax = s.depth > 50 ? 1.6 : 1.3;
       this.speed.target = THREE.MathUtils.clamp(hd / 40, 0.15, vmax);
+      { const he = Math.abs(wrap(desiredYaw - m.yaw)); if (he > 0.6) this.speed.target *= Math.max(0.1, 1 - (he - 0.6)); }
       desiredSurge = 'speed';
       // vertical: glide to waypoint depth — limit descent angle, keep altitude > 15 m
       if (this.navVertical) {
@@ -195,7 +199,7 @@ export class Autopilot {
         this.depth.target = wpDepth;
         this._navVert = true;
       }
-      if (hd < 8 && Math.abs(-wp.y - s.depth) < 12) {
+      if (hd < 8 && (Math.abs(-wp.y - s.depth) < 12 || (this.chartFloor !== undefined && s.depth > -this.chartFloor - 30))) {
         if (this.nav.idx < this.nav.wp.length - 1) this.nav.idx++;
         else {
           sys.msg(`目的地到着: ${this.nav.poi?.name || 'WP'} — 定点保持に移行`, 'good');
@@ -204,7 +208,7 @@ export class Autopilot {
       }
       tags.push('NAV');
       this.navDist = Math.hypot(dx, dz, -wp.y - s.depth);
-    } else if (this.station.on) {
+    } else if (this.station.on && s.vbody) {
       const p = this.station.point;
       const d = new THREE.Vector3(p.x - s.pos.x, 0, p.z - s.pos.z).applyQuaternion(s.quat.clone().invert());
       // d.z negative = point ahead

@@ -27,10 +27,12 @@ export class AudioEngine {
   }
 
   async start() {
-    if (this.ctx) { if (this.ctx.state !== 'running') await this.ctx.resume(); return; }
+    if (this.ctx) { if (this.ctx.state !== 'running') { try { await this.ctx.resume(); } catch { /* ignore */ } } return; }
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
-    const ctx = (this.ctx = new AC({ latencyHint: 'interactive' }));
+    let ctx;
+    try { ctx = this.ctx = new AC({ latencyHint: 'interactive' }); } catch { return; }
+    if (ctx.state !== 'running') ctx.resume().catch(() => {});
     this.master = ctx.createGain(); this.master.gain.value = 0.9;
     const comp = ctx.createDynamicsCompressor();
     comp.threshold.value = -16; comp.knee.value = 12; comp.ratio.value = 4; comp.attack.value = 0.004; comp.release.value = 0.25;
@@ -136,14 +138,14 @@ export class AudioEngine {
     const { g, filt } = this._filterChain(s, dest, o); g.gain.value = gain; s.start(0, rnd() * buf.duration);
     return { src: s, g, filt };
   }
-  _set(param, v, tc = 0.08) { if (param) param.setTargetAtTime(v, this.ctx.currentTime, tc); }
-  _env(g, a, peak, d, t0 = this.ctx.currentTime) { g.gain.cancelScheduledValues(t0); g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(peak, t0 + a); g.gain.exponentialRampToValueAtTime(0.0001, t0 + a + d); }
+  _set(param, v, tc = 0.08) { if (param && Number.isFinite(v)) param.setTargetAtTime(v, this.ctx.currentTime, tc); }
+  _env(g, a, peak, d, t0 = this.ctx.currentTime) { peak = Math.max(0.0002, peak || 0); g.gain.cancelScheduledValues(t0); g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(peak, t0 + a); g.gain.exponentialRampToValueAtTime(0.0001, t0 + a + d); }
   _shot(buf, dest, { gain = 1, a = 0.005, d = 0.3, rate = 1, hp, lp, bp, q, delay = 0 } = {}) {
     const ctx = this.ctx; const s = ctx.createBufferSource(); s.buffer = buf; s.playbackRate.value = rate;
     const { g, filt } = this._filterChain(s, dest, { hp, lp, bp, q });
     const t0 = ctx.currentTime + delay;
     this._env(g, a, gain, d, t0);
-    s.start(t0, rnd() * (buf.duration - a - d - 0.1 > 0 ? buf.duration - a - d - 0.1 : 0)); s.stop(t0 + a + d + 0.05);
+    s.start(t0, Math.max(0, rnd() * Math.max(0, buf.duration - a - d - 0.1))); s.stop(t0 + a + d + 0.05);
     return { s, g, filt, t0 };
   }
   _tone(f, dest, { type = 'sine', gain = 0.3, a = 0.005, d = 0.4, delay = 0, slide = 0 } = {}) {
@@ -228,6 +230,7 @@ export class AudioEngine {
   speak(text) {
     if (!this.voice || !('speechSynthesis' in window)) return;
     try {
+      if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.lang = 'ja-JP'; u.rate = 1.05; u.pitch = 0.9; u.volume = 0.8;
       const vs = speechSynthesis.getVoices().filter((v) => v.lang?.startsWith('ja'));
@@ -244,6 +247,7 @@ export class AudioEngine {
     const { sub, sys, inc, ap } = st;
     const v = this.v, S = (p, x, tc) => this._set(p, x, tc);
     const mute = this.enabled && !st.dead ? 1 : 0;
+    if (!this.enabled && this.master.gain.value > 0.001) this.master.gain.value = 0;
     S(this.master.gain, (st.masterGain ?? 0.9) * mute, 0.3);
     // electrical hum follows bus load
     const pw = Math.min(1, sys.totalPower / 40000);
@@ -311,6 +315,6 @@ export class AudioEngine {
     }
   }
 
-  suspend() { this.ctx?.suspend(); }
-  resume() { this.ctx?.resume(); }
+  suspend() { this.ctx?.suspend().catch(() => {}); try { speechSynthesis.cancel(); } catch { /* ignore */ } }
+  resume() { this.ctx?.resume().catch(() => {}); }
 }

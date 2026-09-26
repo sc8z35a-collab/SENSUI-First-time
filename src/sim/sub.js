@@ -137,7 +137,7 @@ export class Submarine {
         const q = SPEC.vbtFloodRate * this.vbtCmd * Math.min(1, 0.25 + Math.sqrt(dP / 2e5));
         this.vbt = Math.min(SPEC.vbtCap, this.vbt + q * dt);
         this.vbtFlow = q;
-      } else if (this.vbtCmd < 0 && this.vbtPumpOK && this.powerAvail > 0.2) {
+      } else if (this.vbtCmd < 0 && this.vbtPumpOK && sys?.powered('HYD') !== false) {
         // pumping out against sea pressure: hydraulic power-limited
         const qLim = (SPEC.vbtPumpPower * 0.62) / Math.max(dP, 1e5) * 1000; // L/s
         const q = Math.min(SPEC.vbtPumpMaxQ, qLim) * -this.vbtCmd;
@@ -146,10 +146,10 @@ export class Submarine {
         this.vbtPumpW = 800 + SPEC.vbtPumpPower * -this.vbtCmd * Math.min(1, dP / 3e6 + 0.15);
       } else this.vbtFlow = 0;
     } else this.vbtFlow = 0;
-    if (!(this.vbtCmd < 0 && this.vbtPumpOK)) this.vbtPumpW = 0;
+    if (!(this.vbtCmd < 0 && this.vbtPumpOK) || this.vbtFlow === 0) this.vbtPumpW = 0;
 
     // ---------------- trim
-    if (this.trimPumpOK && this.powerAvail > 0.2) this.trim = THREE.MathUtils.clamp(this.trim + this.trimCmd * dt * 0.05, -1, 1);
+    if (this.trimPumpOK && sys?.powered('HYD') !== false) this.trim = THREE.MathUtils.clamp(this.trim + this.trimCmd * dt * 0.05, -1, 1);
 
     // ---------------- thrusters
     this._mix(sys);
@@ -226,11 +226,14 @@ export class Submarine {
     rates.z += (Tq.z / (SPEC.Iroll * 1.3)) * dt;
     this.pitch += rates.x * dt;
     this.yaw += rates.y * dt;
+    if (this.yaw > Math.PI) this.yaw -= 2 * Math.PI; else if (this.yaw < -Math.PI) this.yaw += 2 * Math.PI;
     this.roll += rates.z * dt;
     this.pitch = THREE.MathUtils.clamp(this.pitch, -1.2, 1.2);
     this.roll = THREE.MathUtils.clamp(this.roll, -1.0, 1.0);
     this._updateQuat();
 
+    if (!Number.isFinite(this.vel.x + this.vel.y + this.vel.z)) this.vel.set(0, 0, 0);
+    if (!Number.isFinite(rates.x + rates.y + rates.z)) rates.set(0, 0, 0);
     const prev = this.pos.clone();
     this.pos.addScaledVector(this.vel, dt);
     // do not fly above surface
@@ -310,12 +313,17 @@ export class Submarine {
     return {
       pos: this.pos.toArray(), vel: this.vel.toArray(), yaw: this.yaw, pitch: this.pitch, roll: this.roll,
       vbt: this.vbt, trim: this.trim, weights: { ...this.weights }, floodL: this.floodL, time: this.time, maxDepth: this.maxDepth, distance: this.distance,
+      manipulatorLost: !!this.manipulatorLost, vbtIsolated: this.vbtIsolated, thrustLimit: this.thrustLimit, vbtValveOK: this.vbtValveOK, vbtPumpOK: this.vbtPumpOK, trimPumpOK: this.trimPumpOK, _vbtStuckOpen: !!this._vbtStuckOpen,
       thr: this.thr.map((t) => ({ health: t.health, fault: t.fault, enabled: t.enabled, jam: t.jam, temp: t.temp })),
     };
   }
   restore(s) {
-    this.pos.fromArray(s.pos); this.vel.fromArray(s.vel); this.yaw = s.yaw; this.pitch = s.pitch; this.roll = s.roll;
-    this.vbt = s.vbt; this.trim = s.trim; this.weights = { ...s.weights }; this.floodL = s.floodL; this.time = s.time; this.maxDepth = s.maxDepth; this.distance = s.distance || 0;
+    const num = (v, d = 0) => (Number.isFinite(v) ? v : d);
+    this.pos.fromArray(s.pos); this.vel.fromArray(s.vel || [0, 0, 0]); this.yaw = num(s.yaw); this.pitch = num(s.pitch); this.roll = num(s.roll);
+    this.vbt = num(s.vbt); this.trim = num(s.trim); this.weights = { descent: 2, ascent: 2, ...s.weights }; this.floodL = num(s.floodL); this.time = num(s.time); this.maxDepth = num(s.maxDepth); this.distance = num(s.distance);
+    this.manipulatorLost = !!s.manipulatorLost; this.vbtIsolated = !!s.vbtIsolated; this.thrustLimit = num(s.thrustLimit, 1);
+    this.vbtValveOK = s.vbtValveOK !== false; this.vbtPumpOK = s.vbtPumpOK !== false; this.trimPumpOK = s.trimPumpOK !== false; this._vbtStuckOpen = !!s._vbtStuckOpen;
+    if (!Number.isFinite(this.pos.x + this.pos.y + this.pos.z)) this.pos.set(12, -1.5, 150);
     s.thr?.forEach((t, i) => Object.assign(this.thr[i], t));
     this._updateQuat();
   }
