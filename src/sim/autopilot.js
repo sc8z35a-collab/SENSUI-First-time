@@ -228,7 +228,7 @@ export class Autopilot {
     if (desiredYaw !== null && !ovr(pilotInput.yaw)) {
       const e = wrap(desiredYaw - m.yaw);
       // yaw PID: + yaw input = turn right = negative yaw rate
-      out.yaw = -this.pid.yaw.step(e, dt, s.w.y) * 1.0;
+      out.yaw = -this.pid.yaw.step(e, dt, -s.w.y); // dErr = d(desired-yaw)/dt = -yaw rate (was +: anti-damping)
     }
     if (desiredSurge === 'speed' && !ovr(pilotInput.surge)) {
       const tgt = this.speed.target;
