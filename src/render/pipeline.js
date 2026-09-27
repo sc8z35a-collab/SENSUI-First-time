@@ -369,7 +369,7 @@ export class Pipeline {
     let n = 0;
     for (const s of this.spots) {
       if (n >= MAX_SPOTS) break;
-      if (!s.visible || s.intensity <= 0) continue;
+      if (!s.visible || s.intensity <= 1) continue;
       s.getWorldPosition(u.uSpotPos.value[n]);
       const tp = (this._tp ||= new THREE.Vector3()); s.target.getWorldPosition(tp);
       u.uSpotDir.value[n].copy(tp).sub(u.uSpotPos.value[n]).normalize();
@@ -413,7 +413,7 @@ export class Pipeline {
     }
 
     // 4b. metering (every 4th frame; readback of 64x32 floats is cheap)
-    if (P.autoExposure && (this._lumFrame++ & 3) === 0) {
+    if (P.autoExposure && !this._lumBroken && (this._lumFrame++ & 3) === 0) {
       this.lumMat.uniforms.tSrc.value = this.rtVol.texture;
       this._fs(this.lumMat, this.rtLum);
       try {
@@ -421,7 +421,7 @@ export class Pipeline {
         let sl = 0, sw = 0;
         for (let i = 0; i < 64 * 32; i++) { sl += this.lumBuf[i * 4]; sw += this.lumBuf[i * 4 + 1]; }
         if (sw > 0 && Number.isFinite(sl)) this.avgLum = Math.exp(sl / sw);
-      } catch (e) { /* readback unsupported: keep last value */ }
+      } catch (e) { this._lumBroken = true; /* readback unsupported: keep last value, stop retrying */ }
     }
 
     // 5. final

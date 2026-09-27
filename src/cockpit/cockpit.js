@@ -607,7 +607,9 @@ export class Cockpit {
       if (r2 > (SPHERE_R - 0.04) ** 2 && k !== 2) { this.pLife[i] = k === 0 ? Math.min(this.pLife[i], 0.05) : 0; this.pVel[j] *= -0.2; this.pVel[j + 1] *= -0.2; this.pVel[j + 2] *= -0.2; }
     }
     const g = this.particles.geometry;
-    g.attributes.position.needsUpdate = true; // (cheap: small pool) g.attributes.life.needsUpdate = true; g.attributes.kind.needsUpdate = true; g.attributes.size.needsUpdate = true;
+    // all four attributes change: life/kind/size were commented out, so the GPU never saw a live
+    // particle (leak spray, sparks and smoke were invisible)
+    g.attributes.position.needsUpdate = true; g.attributes.life.needsUpdate = true; g.attributes.kind.needsUpdate = true; g.attributes.size.needsUpdate = true;
 
     // glass condensation + wet rivulets near leaking viewport
     for (const m of this.glass) {

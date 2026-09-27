@@ -85,7 +85,10 @@ export class MFDRenderer {
     }
     c.restore();
     txt(c, fmt(hdg).padStart(3, '0') + '°', cx, 70, C.white, 18, 'center');
-    if (ap.engaged && (ap.hdg.on || ap.nav.on)) { const bx = cx + (((ap.hdg.target - hdg + 540) % 360) - 180) * 2.5; c.fillStyle = C.mag; c.fillRect(bx - 4, 54, 8, 5); }
+    // heading bug: under NAV the target is the bearing to the waypoint, not the stale HDG setting
+    const wpB = ap.nav.on && ap.nav.wp.length ? ap.nav.wp[ap.nav.idx] : null;
+    const bug = wpB ? ((Math.atan2(wpB.x - sub.pos.x, -(wpB.z - sub.pos.z)) * 180 / Math.PI) + 360) % 360 : ap.hdg.target;
+    if (ap.engaged && (ap.hdg.on || ap.nav.on || ap.station.on)) { const bx = cx + (((bug - hdg + 540) % 360) - 180) * 2.5; c.fillStyle = C.mag; c.fillRect(bx - 4, 54, 8, 5); }
     // depth tape (right) & speed (left)
     txt(c, 'DEPTH', w - 58, 44, C.dim, 12, 'center');
     c.fillStyle = '#041620'; c.fillRect(w - 110, 55, 100, 190);
@@ -99,7 +102,7 @@ export class MFDRenderer {
     }
     c.fillStyle = '#000'; c.fillRect(w - 112, 136, 104, 28); c.strokeStyle = C.white; c.strokeRect(w - 112, 136, 104, 28);
     txt(c, fmt(dep, 1), w - 14, 150, sys.sensors.depth ? C.white : C.warn, 18, 'right');
-    if (ap.engaged && ap.depth.on) txt(c, '▶' + fmt(ap.depth.target), w - 60, 256, C.mag, 13, 'center');
+    if (ap.engaged && (ap.depth.on || ap._navVert)) txt(c, '▶' + fmt(ap.depth.target), w - 60, 256, C.mag, 13, 'center');
     const vz = m.vz ?? 0;
     txt(c, (vz >= 0 ? '▼' : '▲') + fmt(Math.abs(vz), 2) + ' m/s', w - 60, 272, Math.abs(vz) > 1.2 ? C.warn : C.txt, 13, 'center');
     // speed
@@ -111,8 +114,8 @@ export class MFDRenderer {
     txt(c, 'ALT', 58, 206, C.dim, 12, 'center');
     txt(c, m.dvl ? fmt(m.alt, 1) + ' m' : 'NO LOCK', 58, 226, m.dvl ? (m.alt < 5 ? C.alarm : m.alt < 12 ? C.warn : C.ok) : C.warn, 15, 'center');
     // bottom strip
-    const B = sub.trimState;
-    txt(c, `BUOY ${B > 0 ? '+' : ''}${fmt(-B, 0)} kg`, 12, h - 44, Math.abs(B) > 150 ? C.warn : C.txt, 14);
+    const B = -sub.trimState; // + = positively buoyant (read '+-50' before)
+    txt(c, `BUOY ${B > 0 ? '+' : ''}${fmt(B, 0)} kg`, 12, h - 44, Math.abs(B) > 150 ? C.warn : C.txt, 14);
     txt(c, `VBT ${fmt(sub.vbt)} L ${sub.vbtFlow > 0 ? '注水' : sub.vbtFlow < 0 ? '排水' : ''}`, 12, h - 24, C.txt, 14);
     txt(c, `TRIM ${fmt(sub.trim * 100)}%`, cx, h - 44, C.txt, 14, 'center');
     txt(c, `WT D${sub.weights.descent} A${sub.weights.ascent}`, cx, h - 24, C.txt, 14, 'center');
@@ -154,7 +157,7 @@ export class MFDRenderer {
     // breadcrumb trail
     if (st.trail) { c.fillStyle = C.cyan; for (let i = 0; i < st.trail.length; i += 2) { const [x, y] = toScr(st.trail[i], st.trail[i + 1]); c.fillRect(x - 1, y - 1, 2, 2); } }
     // start / mothership
-    { const [x, y] = toScr(0, 150); c.strokeStyle = C.ok; c.strokeRect(x - 5, y - 5, 10, 10); txt(c, 'MOTHERSHIP', x + 8, y, C.ok, 10); }
+    { const [x, y] = toScr(-10, 150); /* mothership position */ c.strokeStyle = C.ok; c.strokeRect(x - 5, y - 5, 10, 10); txt(c, 'MOTHERSHIP', x + 8, y, C.ok, 10); }
     // own ship
     c.fillStyle = C.white; c.beginPath(); c.moveTo(cx, cy - 12); c.lineTo(cx + 7, cy + 8); c.lineTo(cx, cy + 4); c.lineTo(cx - 7, cy + 8); c.closePath(); c.fill();
     // velocity vector

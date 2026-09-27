@@ -241,14 +241,16 @@ export class Exterior {
       const on = powered && !l.dead && lvl > 0.01 && l.flicker <= 0;
       const I = on ? l.max * lvl * brown : 0;
       l.L.intensity += (I - l.L.intensity) * Math.min(1, dt * 25); // LED driver soft-start
-      l.L.visible = l.L.intensity > 1;
+      // keep the light in the scene: toggling .visible changes the light count and recompiles every
+      // material (multi-second hitch on each flicker / lamp switch)
+      if (l.L.intensity < 1 && I === 0) l.L.intensity = 0;
       const e = l.L.intensity / l.max;
       l.lensM.color.setRGB(1, 0.97, 0.92).multiplyScalar(0.05 + e * 60);
       extLight += e;
     }
     this.extLight = extLight;
     // lasers
-    const lz = st.lasers && powered;
+    const lz = st.lasers && sys.powered('CAM'); // laser scalers hang off the camera circuit
     for (const L of this.lasers) L.intensity = lz ? 900 : 0;
     // strobe: flashes only near the surface / on emergency ascent
     const strobeOn = (sub.depth < 40 || st.ap?.ascent?.on) && (t % 2) < 0.06;

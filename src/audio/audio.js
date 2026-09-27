@@ -209,7 +209,7 @@ export class AudioEngine {
   }
   ping(range = 1) {
     // OAS/sonar ping heard through the hull, with the far echo
-    this._tone(11500 * 0 + 1450, this.hull, { gain: 0.05, a: 0.003, d: 0.25 });
+    this._tone(1450, this.hull, { gain: 0.05, a: 0.003, d: 0.25 });
     this._tone(1450, this.verbIn, { gain: 0.02, a: 0.003, d: 0.5, delay: 0.05 });
     if (range < 1) this._tone(1450, this.hull, { gain: 0.02 * (1 - range), a: 0.01, d: 0.3, delay: 0.2 + range * 0.8 });
   }
@@ -228,7 +228,7 @@ export class AudioEngine {
     this._ringLvl = Math.max(this._ringLvl, 0.6 * Math.min(1, k));
   }
   speak(text) {
-    if (!this.voice || !('speechSynthesis' in window)) return;
+    if (!this.enabled || !this.voice || !('speechSynthesis' in window)) return;
     try {
       if (speechSynthesis.speaking || speechSynthesis.pending) speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
@@ -315,6 +315,13 @@ export class AudioEngine {
     }
   }
 
+  // fade every continuous voice to silence (end of dive: update() is no longer called)
+  silenceVoices() {
+    if (!this.ctx || !this.v) return;
+    const off = (x) => { if (x?.g) this._set(x.g.gain, 0, 0.3); };
+    for (const k in this.v) { const x = this.v[k]; if (Array.isArray(x)) x.forEach((g) => Object.values(g).forEach(off)); else off(x); }
+    this._ringLvl = 0;
+  }
   suspend() { this.ctx?.suspend().catch(() => {}); try { speechSynthesis.cancel(); } catch { /* ignore */ } }
-  resume() { this.ctx?.resume().catch(() => {}); }
+  resume() { if (this.ctx && this.ctx.state !== 'running' && this.ctx.state !== 'closed') this.ctx.resume().catch(() => {}); }
 }
