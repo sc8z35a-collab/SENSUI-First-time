@@ -74,7 +74,8 @@ export class Game {
     r.toneMapping = THREE.NoToneMapping;
     r.shadowMap.enabled = true;
     r.shadowMap.type = THREE.PCFShadowMap; // PCFSoft was removed in r18x (warned + fell back every boot)
-    setMaxAnisotropy(r.capabilities.getMaxAnisotropy());
+    // textures are created during boot: give them the preset's anisotropy from the start (was always GPU max)
+    setMaxAnisotropy(Math.min((QUALITY[this.quality] || QUALITY[2]).aniso, r.capabilities.getMaxAnisotropy()));
     this.pipe = new Pipeline(r);
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(74, innerWidth / Math.max(1, innerHeight), 0.03, 900);
@@ -190,7 +191,7 @@ export class Game {
       audio.play(f.sev >= 3 ? 'warn' : 'chime');
       if (f.sfx) audio.play(f.sfx);
       hud.msg(`${f.sev >= 3 ? '⚠ WARNING' : 'CAUTION'}: ${f.title}`, f.sev >= 3 ? 'alarm' : 'warn');
-      sys.messages.push({ text: f.title, level: f.sev >= 3 ? 'alarm' : 'warn', t: this.sub.time });
+      sys.record(f.title, f.sev >= 3 ? 'alarm' : 'warn');
       if (this.timeScale > 1) { this.setTimeScale(1); hud.msg('異常発生 — 時間加速を解除', 'warn'); }
       if (f.shake) this.shake = Math.max(this.shake, f.shake);
       if (f.sfx === 'bang' || f.sfx === 'crack') this.flash = Math.max(this.flash, 0.15);
@@ -198,19 +199,23 @@ export class Game {
       if (f.kind === 'leak') navigator.vibrate?.([30, 40, 30]);
       if (f.sev >= 2) setTimeout(() => this.radio(this._radioReply(f)), 5000 + Math.random() * 4000);
     };
-    inc.onImpact = (e) => { audio.thud(e); this.shake = Math.max(this.shake, Math.min(1.2, e * 0.9)); navigator.vibrate?.(Math.min(200, 40 + e * 80)); if (e > 1) this.flash = Math.max(this.flash, 0.06); };
+    // via play(): respects the sound toggle and never throws without an AudioContext
+    inc.onImpact = (e) => { audio.play('thud', e); this.shake = Math.max(this.shake, Math.min(1.2, e * 0.9)); navigator.vibrate?.(Math.min(200, 40 + e * 80)); if (e > 1) this.flash = Math.max(this.flash, 0.06); };
     inc.onRepairStart = () => audio.play('tool');
+    inc.onDrop = () => { audio.play('drop'); this._burst(40, -1.7); this.shake = Math.max(this.shake, 0.3); };
     inc.onRepairDone = () => audio.play('good');
     this.life.onSighting = (name) => {
       const s = SPECIES[name];
       if (!s || this.state !== 'play') return;
       hud.msg(`🐟 生物発見: ${s[0]} — ${s[1]}`, 'good');
-      sys.messages.push({ text: `生物発見: ${s[0]}`, level: 'good', t: this.sub.time });
+      sys.record(`生物発見: ${s[0]}`, 'good');
       audio.play('good');
     };
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) { if (this.state === 'play') this.save(); this.audio.suspend(); } else if (this.state === 'play') this.audio.resume();
     });
+    // mobile browsers interrupt the AudioContext (calls, other apps): resume on the next touch
+    document.addEventListener('pointerdown', () => { if (this.state === 'play' && this.audio.ctx && this.audio.ctx.state !== 'running') this.audio.resume(); }, true);
   }
 
   _radioReply(f) {
@@ -231,7 +236,7 @@ export class Game {
   radio(text) {
     if (this.sys.comms.signal < 0.15 || this.state !== 'play') return;
     this.hud.msg(`📻 かいれい: ${text}`, 'radio');
-    this.sys.messages.push({ text: `かいれい: ${text}`, level: 'radio', t: this.sub.time });
+    this.sys.record(`かいれい: ${text}`, 'radio');
     this.audio.speak(text);
   }
 
@@ -266,9 +271,13 @@ export class Game {
     while (this.sub.dropWeight('descent')) n++;
     while (this.sub.dropWeight('ascent')) n++;
     if (n) { this.audio.play('drop'); this._burst(80, -1.7); }
-    this.sub.vbtIsolated = false; this.sub._vbtStuckOpen = false;
+    // un-isolate only a healthy VBT: re-opening a stuck-open flood valve floods it again mid-ascent
+    if (this.sub.vbtValveOK && !this.sub._vbtStuckOpen) this.sub.vbtIsolated = false;
     this.ap.engage(true); this.ap.setMode('ascent', true);
     this.ap.ballastAuto = true;
+    this._homeBound = false;
+    // without the NAV computer the AP cannot run the ascent: pump the VBT dry by hand
+    if (!this.ap.engaged) this.sub.vbtCmd = this.sys.powered('HYD') ? -1 : 0;
     this.sys.msg(`緊急浮上！ ウェイト ${n} 個投棄、VBT全排水`, 'alarm');
     this.radio('緊急浮上を確認した。浮上地点に向かう。');
   }
@@ -279,15 +288,18 @@ export class Game {
     this.audio.play('grind');
   }
   navTo(p) {
+    if (!this.sys.powered('NAV')) { this.hud.msg('航法コンピュータに電源がない — 自動航行不能', 'warn'); return; }
     this._homeBound = false;
     this.ap.engage(true); this.ap.navTo(p);
     this.sys.msg(`自動航行開始 → ${p.name}`, 'info');
     this.radio(`了解。${p.name}への航行を許可する。`);
   }
-  returnHome() {
+  returnHome(silent = false) {
+    if (!this.sys.powered('NAV')) { this.hud.msg('航法コンピュータに電源がない — 自動航行不能', 'warn'); return; }
     this._homeBound = true;
     this.ap.engage(true);
     this.ap.navTo({ id: 'home', name: '母船直下', nameEn: 'Mothership', x: MOTHERSHIP.x, y: -Math.min(40, Math.max(12, this.sub.depth)) - 12, z: MOTHERSHIP.z, r: 30 });
+    if (silent) return;
     this.sys.msg('母船直下へ帰還航行開始', 'info');
     this.radio('了解。母船直下で浮上せよ。回収準備に入る。');
   }
@@ -300,10 +312,17 @@ export class Game {
     const rc = (this._rc ||= new THREE.Raycaster());
     rc.setFromCamera(ndc, this.camera);
     const hits = rc.intersectObjects(this.cockpit.scene.children, true);
+    // Raycaster ignores visibility and hits Points within a 1 m threshold: the hidden flood-water
+    // plane and the particle pool sit in front of the console and swallowed most taps.
+    const shown = (o) => { for (; o; o = o.parent) if (!o.visible) return false; return true; };
     for (const h of hits) {
-      let o = h.object;
+      const ob = h.object;
+      if (ob.isPoints || ob.isLine || !shown(ob)) continue;
+      let o = ob;
       while (o && !o.userData.action) o = o.parent;
       if (o) { this._cockpitAction(o.userData.action); return; }
+      const m = Array.isArray(ob.material) ? ob.material[0] : ob.material;
+      if (m && m.transparent && m.depthWrite === false) continue; // glass / decals do not block
       if (h.distance > 0.2) break; // first real surface blocks the tap
     }
   }
@@ -351,12 +370,13 @@ export class Game {
     this.controls.reset();
     if (fromSave) this.load();
     else {
+      this.inc.clock = 0; // (was reset after load too: re-armed the scripted first incident on every continue)
       this.sys.msg('DSV-11 わだつみ 潜航開始。全系統正常。', 'good');
       setTimeout(() => this.radio('わだつみ、こちら母船かいれい。潜航を許可する。良い航海を。'), 2500);
     }
     this.state = 'play';
+    this.life.recording = true;
     this._devStart = false;
-    this.inc.clock = 0;
     this._clock.getDelta(); this._acc = 0; // no catch-up burst after the title screen
     this.ui.classList.add('play');
   }
@@ -377,20 +397,29 @@ export class Game {
   save() {
     try {
       if (this.state !== 'play' || this.sys.dead) return;
-      const d = { v: 1, sub: this.sub.serialize(), sys: this.sys.serialize(), inc: this.inc.serialize(), ap: this.ap.serialize(), disc: [...this.discovered], sampled: [...this.sampled], samples: this.samples, sight: [...this.life.sightings], at: Date.now() };
+      const d = { v: 1, sub: this.sub.serialize(), sys: this.sys.serialize(), inc: this.inc.serialize(), ap: this.ap.serialize(), disc: [...this.discovered], sampled: [...this.sampled], samples: this.samples, sight: [...this.life.sightings], home: !!this._homeBound, arm: this.ext.armTarget, at: Date.now() };
       localStorage.setItem(SAVE_KEY, JSON.stringify(d));
     } catch (e) { console.warn('save failed', e); }
   }
-  static hasSave() { try { const d = JSON.parse(localStorage.getItem(SAVE_KEY)); return d && d.v === 1 ? d : null; } catch { return null; } }
+  static hasSave() { try { const d = JSON.parse(localStorage.getItem(SAVE_KEY)); return d && d.v === 1 && d.sub && Array.isArray(d.sub.pos) && d.sub.pos.length === 3 ? d : null; } catch { return null; } }
   static clearSave() { try { localStorage.removeItem(SAVE_KEY); } catch { /* ignore */ } }
   load() {
     const d = Game.hasSave(); if (!d) return;
     try {
       this.sub.restore(d.sub); this.sys.restore(d.sys);
     } catch (e) { console.warn('corrupt save', e); Game.clearSave(); return; }
-    this.inc.sealant = d.inc?.sealant ?? 2;
-    this.inc.clock = d.inc?.clock ?? 0;
-    if (d.ap) { for (const k of ['hdg', 'depth', 'alt', 'speed']) if (d.ap[k]) Object.assign(this.ap[k], d.ap[k]); }
+    try { this.inc.restore(d.inc || {}); } catch (e) { console.warn('incident restore', e); }
+    if (d.ap) {
+      const ap = this.ap;
+      for (const k of ['hdg', 'depth', 'alt', 'speed', 'descent', 'ascent']) if (d.ap[k]) Object.assign(ap[k], d.ap[k]);
+      if (d.ap.station) { ap.station.on = !!d.ap.station.on; if (Array.isArray(d.ap.station.point)) ap.station.point.fromArray(d.ap.station.point); }
+      if (typeof d.ap.oas === 'boolean') ap.oas.on = d.ap.oas;
+      if (typeof d.ap.ballastAuto === 'boolean') ap.ballastAuto = d.ap.ballastAuto;
+      ap.engaged = !!d.ap.engaged && this.sys.powered('NAV'); // saved but never restored before
+      if (d.home) this.returnHome(true);
+      else if (d.ap.nav) { const p = POIS.find((x) => x.id === d.ap.nav); if (p) this.navTo(p); }
+    }
+    if (d.arm && !this.sub.manipulatorLost) { this.ext.setArm(true); this.ext.armPose = 1; }
     for (const m of [100, 200, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 10900]) if (this.sub.maxDepth > m) this._milestones.add(m);
     d.disc?.forEach((x) => this.discovered.add(x)); d.sampled?.forEach((x) => this.sampled.add(x)); this.samples = d.samples || 0;
     d.sight?.forEach((x) => this.life.sightings.add(x));
@@ -399,6 +428,7 @@ export class Game {
 
   resize() {
     const w = innerWidth, h = innerHeight;
+    if (!(w > 0 && h > 0)) return; // zero-size viewport during orientation changes -> NaN projection
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.fov = THREE.MathUtils.clamp(64 * (1.9 / Math.max(1.3, w / h)) + 10, 66, 82);
@@ -466,6 +496,7 @@ export class Game {
       this.sub.pos.y = -1.5 + Math.sin(t * 0.6) * 0.1;
       this.sub.roll = Math.sin(t * 0.5) * 0.02; this.sub.pitch = Math.sin(t * 0.37) * 0.015;
       this.sub.yaw += dt * 0.004;
+      if (this.sub.yaw > Math.PI) this.sub.yaw -= 2 * Math.PI;
       this.sub._updateQuat();
     }
     this._visual(dt, t);
@@ -477,6 +508,8 @@ export class Game {
     const pilot = this.controls.read();
     this.pilot = pilot;
     if (this.timeScale > 1 && (Math.abs(pilot.surge) + Math.abs(pilot.yaw) + Math.abs(pilot.heave) + Math.abs(pilot.sway)) > 0.1) this.setTimeScale(1);
+    // time compression is only legal under autopilot: drop it when the AP trips out (e.g. NAV power loss)
+    if (this.timeScale > 1 && !ap.engaged) { this.setTimeScale(1); this.hud.msg('自動操縦解除 — 時間加速を解除', 'warn'); }
     const cap = THREE.MathUtils.clamp(sys.pilotHealth * 1.4 - 0.2, 0, 1);
     ap.update(dt, { surge: pilot.surge * cap, yaw: pilot.yaw * cap, heave: pilot.heave * cap, sway: pilot.sway * cap });
     if (this.env.quake > 0) sub.extForce.add(_v.set((Math.random() - 0.5) * 6000, (Math.random() - 0.5) * 4000, (Math.random() - 0.5) * 6000));
@@ -495,7 +528,7 @@ export class Game {
         this.audio.play('good');
         setTimeout(() => this.radio(`${p.name}への到達を確認。素晴らしい。映像を記録せよ。`), 3000);
       }
-      if (d < p.r * 0.6 && this.ext.armPose > 0.9 && !this.sampled.has(p.id) && sub.altitude < 6) {
+      if (d < p.r * 0.6 && this.ext.armPose > 0.9 && !sub.manipulatorLost && !this.sampled.has(p.id) && sub.altitude < 6) {
         this.sampled.add(p.id); this.samples++;
         sys.msg(`マニピュレーターで試料採取: ${p.name}`, 'good');
         this.audio.play('grind');
@@ -526,6 +559,9 @@ export class Game {
   _endCommon() {
     this.controls.reset(); this.hud.releaseHolds(); this.hud.close();
     this.timeScale = 1;
+    this.life.recording = false;
+    this.inc.cancelRepair();
+    this.audio.silenceVoices?.(); // continuous hums/hiss kept playing under the end screen
     this.ui.classList.remove('play');
     try { speechSynthesis?.cancel(); } catch { /* ignore */ }
   }
