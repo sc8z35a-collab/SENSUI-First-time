@@ -293,7 +293,10 @@ export class HUD {
   _guard(parent, label, fn, sub) {
     // two-step guarded switch (flip cover, then press) — like real jettison switches
     const b = this._btn(parent, '', () => {
-      if (b.dataset.armed === '1') { b.dataset.armed = '0'; fn(); } else { b.dataset.armed = '1'; setTimeout(() => { b.dataset.armed = '0'; }, 3000); }
+      // stale timer from an earlier arm used to disarm a fresh one early
+      clearTimeout(b._armT);
+      if (b.dataset.armed === '1') { b.dataset.armed = '0'; fn(); } else { b.dataset.armed = '1'; b._armT = setTimeout(() => { b.dataset.armed = '0'; }, 3000); }
+      this._patch();
     }, 'guard');
     this._live(b, (e) => { e.innerHTML = `${e.dataset.armed === '1' ? '⚠ もう一度押して実行' : label}<small>${sub()}</small>`; e.classList.toggle('armed', e.dataset.armed === '1'); });
     return b;
@@ -318,9 +321,9 @@ export class HUD {
     const pr = h('div', 'btnrow'); bg.appendChild(pr);
     const xt = this._btn(pr, '', () => { sys.cross = !sys.cross; sys.msg(`クロスタイ ${sys.cross ? '投入' : '開放'}`); }, 'amber');
     this._live(xt, (e) => { e.innerHTML = `X-TIE<small>${sys.cross ? 'ON 連系' : 'OFF'}</small>`; e.classList.toggle('on', sys.cross); });
-    for (const n of ['A', 'B']) { const b = this._btn(pr, '', () => { sys.bat[n].online = !sys.bat[n].online; sys.msg(`バッテリー${n} ${sys.bat[n].online ? '接続' : '切離'}`, 'warn'); }); this._live(b, (e) => { e.innerHTML = `BATT ${n}<small>${sys.bat[n].online ? 'ONLINE' : 'OFFLINE'}</small>`; e.classList.toggle('on', sys.bat[n].online); }); }
+    for (const n of ['A', 'B']) { const b = this._btn(pr, '', () => { if (!sys.bat[n].online && sys.bat[n].soc <= 0) { sys.msg(`バッテリー${n} は枯渇している`, 'warn'); return; } sys.bat[n].online = !sys.bat[n].online; sys.msg(`バッテリー${n} ${sys.bat[n].online ? '接続' : '切離'}`, 'warn'); }); this._live(b, (e) => { e.innerHTML = `BATT ${n}<small>${sys.bat[n].online ? 'ONLINE' : 'OFFLINE'}</small>`; e.classList.toggle('on', sys.bat[n].online); }); }
     const tl = this._btn(pr, '', () => { sub.thrustLimit = sub.thrustLimit >= 1 ? 0.5 : sub.thrustLimit >= 0.5 ? 0.25 : 1; }); this._live(tl, (e) => { e.innerHTML = `推進制限<small>${fmt(sub.thrustLimit * 100)}%</small>`; });
-    const tot = h('div', 'pr'); bg.appendChild(tot); this._live(tot, (e) => { const kwh = (sys.bat.A.soc * sys.bat.A.cap + sys.bat.B.soc * sys.bat.B.cap); e.innerHTML = `総負荷 <b>${fmt(sys.totalPower / 1000, 2)} kW</b> · 残エネルギー ${fmt(kwh, 1)} kWh · 推定残時間 <b>${fmt(kwh / Math.max(0.3, sys.totalPower / 1000), 1)} h</b>`; });
+    const tot = h('div', 'pr'); bg.appendChild(tot); this._live(tot, (e) => { const kwh = ['A', 'B', 'E'].reduce((s, n) => s + (sys.bat[n].online ? sys.bat[n].soc * sys.bat[n].cap : 0), 0); e.innerHTML = `総負荷 <b>${fmt(sys.totalPower / 1000, 2)} kW</b> · 残エネルギー ${fmt(kwh, 1)} kWh · 推定残時間 <b>${fmt(kwh / Math.max(0.3, sys.totalPower / 1000), 1)} h</b>`; });
 
     // breakers
     const bk = this._grp(body, 'BREAKERS 配電盤');
@@ -345,8 +348,9 @@ export class HUD {
     const br = h('div', 'btnrow'); ba.appendChild(br);
     this._hold(br, '注水 FLOOD', (on) => this.g.vbtManual(on ? 1 : 0), 'blue');
     this._hold(br, '排水 PUMP', (on) => this.g.vbtManual(on ? -1 : 0), 'amber');
-    this._hold(br, 'トリム 艦首↓', (on) => { sub.trimCmd = on ? 1 : 0; });
-    this._hold(br, 'トリム 艦首↑', (on) => { sub.trimCmd = on ? -1 : 0; });
+    const trim = (v) => { if (v && (!sub.trimPumpOK || !this.g.sys.powered('HYD'))) this.msg(sub.trimPumpOK ? '油圧系統に電源がない — トリム不能' : 'トリムポンプ故障中', 'warn'); sub.trimCmd = v; };
+    this._hold(br, 'トリム 艦首↓', (on) => trim(on ? 1 : 0));
+    this._hold(br, 'トリム 艦首↑', (on) => trim(on ? -1 : 0));
     const ab = this._btn(br, '', () => { this.g.ap.ballastAuto = !this.g.ap.ballastAuto; }); this._live(ab, (e) => { e.innerHTML = `自動浮力<small>${this.g.ap.ballastAuto ? 'AUTO' : 'MAN'}</small>`; e.classList.toggle('on', this.g.ap.ballastAuto); });
     const arm = this._btn(br, '', () => this.g.toggleArm()); this._live(arm, (e) => { e.innerHTML = `マニピュレーター<small>${sub.manipulatorLost ? 'LOST' : this.g.ext.armTarget ? 'DEPLOYED' : 'STOWED'}</small>`; e.classList.toggle('on', !!this.g.ext.armTarget); });
 
@@ -360,7 +364,7 @@ export class HUD {
     this._btn(lr2, 'O2流量 +', () => { sys.o2Flow = Math.min(2, +(sys.o2Flow + 0.05).toFixed(2)); }, 'sm');
     this._btn(lr2, 'キャニスター交換', () => { sys.swapCanister(); this.g.audio.play('tool'); });
     const fan = this._btn(lr2, '', () => { sys.scrubber.fan = !sys.scrubber.fan; }); this._live(fan, (e) => { e.innerHTML = `スクラバーファン<small>${!sys.scrubber.fanOK ? 'FAIL' : sys.scrubber.fan ? 'ON' : 'OFF'}</small>`; e.classList.toggle('on', sys.scrubber.fan && sys.scrubber.fanOK); });
-    const ht = this._btn(lr2, '', () => sys.toggleBreaker('HEAT')); this._live(ht, (e) => { e.innerHTML = `暖房<small>${sys.powered('HEAT') ? 'ON 1.8kW' : 'OFF'}</small>`; e.classList.toggle('on', sys.powered('HEAT')); });
+    const ht = this._btn(lr2, '', () => { sys.toggleBreaker('HEAT'); this.g.audio.play('breaker'); }); this._live(ht, (e) => { e.innerHTML = `暖房<small>${sys.powered('HEAT') ? 'ON 1.8kW' : 'OFF'}</small>`; e.classList.toggle('on', sys.powered('HEAT')); });
   }
 
   // ---------------- NAV
