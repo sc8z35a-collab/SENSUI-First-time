@@ -12,6 +12,8 @@ import { density, gradient } from '../world/density.js';
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _q = new THREE.Quaternion(), _e = new THREE.Euler(0, 0, 0, 'YXZ');
 const _g = [0, 0, 0];
+// per-step scratch (the integrator runs up to ~960x per frame under time compression: no allocations)
+const _qi = new THREE.Quaternion(), _drag = new THREE.Vector3(), _fw = new THREE.Vector3(), _fb = new THREE.Vector3(), _tq = new THREE.Vector3(), _prev = new THREE.Vector3();
 
 export const SPEC = {
   name: 'DSV-11 わだつみ',
@@ -91,6 +93,9 @@ export class Submarine {
     this.time = 0;
     this.maxDepth = 0;
     this.distance = 0;
+    this.vbody = new THREE.Vector3();
+    this.acc = new THREE.Vector3();
+    this.vbtFlow = 0; this.vbtPumpW = 0; this.thrPower = 0;
     this._updateQuat();
   }
 
@@ -159,7 +164,8 @@ export class Submarine {
     const seaT = temperatureAt(depth);
     for (const t of this.thr) {
       let target = t.enabled && !t.fault ? t.cmd * this.powerAvail * this.thrustLimit : 0;
-      if (t.fault === 'degraded') target = t.cmd * 0.45 * this.powerAvail;
+      // a worn bearing still obeys the disable switch and the power-management limit
+      if (t.fault === 'degraded' && t.enabled) target = t.cmd * 0.45 * this.powerAvail * this.thrustLimit;
       if (t.jam > 0) target *= Math.max(0, 1 - t.jam);
       t.rpm += (target - t.rpm) * Math.min(1, dt / 0.45);
       const s = t.rpm;
@@ -180,10 +186,9 @@ export class Submarine {
 
     // ---------------- hydrodynamics (body frame, relative to current)
     const cur = currentAt(this.pos.x, this.pos.y, this.pos.z, this.time, this.currentExtra);
-    const vr = new THREE.Vector3(this.vel.x - cur[0], this.vel.y - cur[1], this.vel.z - cur[2]);
-    const qi = this.quat.clone().invert();
-    const vb = vr.clone().applyQuaternion(qi);
-    const drag = new THREE.Vector3(
+    const qi = _qi.copy(this.quat).invert();
+    const vb = this.vbody.set(this.vel.x - cur[0], this.vel.y - cur[1], this.vel.z - cur[2]).applyQuaternion(qi);
+    const drag = _drag.set(
       -0.5 * rho * SPEC.cdaSway * vb.x * Math.abs(vb.x) - 120 * vb.x,
       -0.5 * rho * SPEC.cdaHeave * vb.y * Math.abs(vb.y) - 150 * vb.y,
       -0.5 * rho * SPEC.cdaSurge * vb.z * Math.abs(vb.z) - 60 * vb.z,
@@ -191,7 +196,7 @@ export class Submarine {
     fBody.add(drag);
     // world forces
     const M = this.totalMass;
-    const fWorld = fBody.clone().applyQuaternion(this.quat);
+    const fWorld = _fw.copy(fBody).applyQuaternion(this.quat);
     const nb = this.netBuoyancy(depth);
     fWorld.y += nb;
     fWorld.add(this.extForce);
@@ -199,11 +204,9 @@ export class Submarine {
     if (this.pos.y > -4) fWorld.y += Math.sin(this.time * 0.9) * 2500 * (1 + this.pos.y / 4);
 
     // effective (added) mass per body axis -> approximate in world by projecting
-    const am = new THREE.Vector3(SPEC.amSway, SPEC.amHeave, SPEC.amSurge);
-    const fb2 = fWorld.clone().applyQuaternion(qi);
-    fb2.x /= M * (1 + am.x); fb2.y /= M * (1 + am.y); fb2.z /= M * (1 + am.z);
-    const acc = fb2.applyQuaternion(this.quat);
-    this.acc = acc.clone();
+    const fb2 = _fb.copy(fWorld).applyQuaternion(qi);
+    fb2.x /= M * (1 + SPEC.amSway); fb2.y /= M * (1 + SPEC.amHeave); fb2.z /= M * (1 + SPEC.amSurge);
+    const acc = this.acc.copy(fb2.applyQuaternion(this.quat));
     this.vel.addScaledVector(acc, dt);
 
     // ---------------- rotational
@@ -213,7 +216,7 @@ export class Submarine {
     const tPitch = -W * SPEC.BG * Math.sin(this.pitch) - W * xg * Math.cos(this.pitch);
     const tRoll = -W * SPEC.BG * Math.sin(this.roll) + (this.rollBias || 0) * W;
     const rates = this.w;
-    const Tq = new THREE.Vector3(tBody.x + tPitch, tBody.y, tBody.z + tRoll).add(this.extTorque);
+    const Tq = _tq.set(tBody.x + tPitch, tBody.y, tBody.z + tRoll).add(this.extTorque);
     // damping (quadratic + linear), stronger with speed for yaw (fin effect)
     const sp = Math.abs(vb.z);
     Tq.x += -rates.x * Math.abs(rates.x) * 4.2e5 - rates.x * 3.2e4;
@@ -228,13 +231,14 @@ export class Submarine {
     this.yaw += rates.y * dt;
     if (this.yaw > Math.PI) this.yaw -= 2 * Math.PI; else if (this.yaw < -Math.PI) this.yaw += 2 * Math.PI;
     this.roll += rates.z * dt;
-    this.pitch = THREE.MathUtils.clamp(this.pitch, -1.2, 1.2);
-    this.roll = THREE.MathUtils.clamp(this.roll, -1.0, 1.0);
+    // hard attitude stops: also kill the rate into the stop (it used to wind up behind the clamp)
+    if (Math.abs(this.pitch) > 1.2) { this.pitch = Math.sign(this.pitch) * 1.2; if (rates.x * this.pitch > 0) rates.x = 0; }
+    if (Math.abs(this.roll) > 1.0) { this.roll = Math.sign(this.roll) * 1.0; if (rates.z * this.roll > 0) rates.z = 0; }
     this._updateQuat();
 
     if (!Number.isFinite(this.vel.x + this.vel.y + this.vel.z)) this.vel.set(0, 0, 0);
     if (!Number.isFinite(rates.x + rates.y + rates.z)) rates.set(0, 0, 0);
-    const prev = this.pos.clone();
+    const prev = _prev.copy(this.pos);
     this.pos.addScaledVector(this.vel, dt);
     // do not fly above surface
     if (this.pos.y > 0.4) { this.pos.y = 0.4; if (this.vel.y > 0) this.vel.y *= 0.3; }
@@ -242,7 +246,6 @@ export class Submarine {
     this._collide(dt);
     this.distance += prev.distanceTo(this.pos);
     this.speed = vb.z * -1; // forward speed through water
-    this.vbody = vb;
     this.depth = Math.max(0, -this.pos.y);
     if (this.depth > this.maxDepth) this.maxDepth = this.depth;
     this.extForce.set(0, 0, 0); this.extTorque.set(0, 0, 0);
@@ -315,6 +318,8 @@ export class Submarine {
       vbt: this.vbt, trim: this.trim, weights: { ...this.weights }, floodL: this.floodL, time: this.time, maxDepth: this.maxDepth, distance: this.distance,
       manipulatorLost: !!this.manipulatorLost, vbtIsolated: this.vbtIsolated, thrustLimit: this.thrustLimit, vbtValveOK: this.vbtValveOK, vbtPumpOK: this.vbtPumpOK, trimPumpOK: this.trimPumpOK, _vbtStuckOpen: !!this._vbtStuckOpen,
       thr: this.thr.map((t) => ({ health: t.health, fault: t.fault, enabled: t.enabled, jam: t.jam, temp: t.temp })),
+      tether: this.tether ? { anchor: this.tether.anchor.toArray(), len: this.tether.len, strength: this.tether.strength } : null,
+      currentExtra: this.currentExtra,
     };
   }
   restore(s) {
@@ -324,7 +329,14 @@ export class Submarine {
     this.manipulatorLost = !!s.manipulatorLost; this.vbtIsolated = !!s.vbtIsolated; this.thrustLimit = num(s.thrustLimit, 1);
     this.vbtValveOK = s.vbtValveOK !== false; this.vbtPumpOK = s.vbtPumpOK !== false; this.trimPumpOK = s.trimPumpOK !== false; this._vbtStuckOpen = !!s._vbtStuckOpen;
     if (!Number.isFinite(this.pos.x + this.pos.y + this.pos.z)) this.pos.set(12, -1.5, 150);
-    s.thr?.forEach((t, i) => Object.assign(this.thr[i], t));
+    // explicit fields only (Object.assign could overwrite id/pos/axis tables from a tampered save)
+    s.thr?.forEach((t, i) => { if (this.thr[i] && t) { const T = this.thr[i]; T.fault = t.fault ?? null; T.enabled = t.enabled !== false; T.jam = num(t.jam); T.temp = num(t.temp, 12); T.health = num(t.health, 1); } });
+    this.vbt = THREE.MathUtils.clamp(this.vbt, 0, SPEC.vbtCap); this.trim = THREE.MathUtils.clamp(this.trim, -1, 1);
+    // entanglement survives a reload (jammed thrusters without a tether could never be freed)
+    if (s.tether && Array.isArray(s.tether.anchor)) this.tether = { anchor: new THREE.Vector3().fromArray(s.tether.anchor), len: num(s.tether.len, 8), strength: num(s.tether.strength, 0.5) };
+    else { this.tether = null; for (const t of this.thr) t.jam = 0; }
+    this.currentExtra = num(s.currentExtra);
+    this.depth = Math.max(0, -this.pos.y);
     this._updateQuat();
   }
 }

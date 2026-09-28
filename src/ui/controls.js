@@ -28,6 +28,7 @@ class Stick {
   }
   home() {
     const h = innerHeight, w = innerWidth;
+    if (!(w > 0 && h > 0)) return;
     this.R = Math.round(Math.max(44, Math.min(70, h * 0.15)));
     // clear of the side button columns (~62 px) and the bottom edge / gesture bar
     const inset = 62 + this.R + 14;
@@ -81,7 +82,7 @@ export class Controls {
     this.look = { yaw: 0, pitch: 0, vy: 0, vp: 0, id: null, lx: 0, ly: 0, t0: 0, moved: 0, sx: 0, sy: 0 };
     this.onTap = onTap; this.onLook = onLook;
     this.precision = false; // fine-control mode halves all demands
-    this.lookSens = (() => { try { const v = +localStorage.getItem('ad-look'); return v > 0 ? v : 0.0042; } catch { return 0.0042; } })();
+    this.lookSens = (() => { try { const v = +localStorage.getItem('ad-look'); return v > 0 && v < 0.05 ? v : 0.0042; } catch { return 0.0042; } })();
     this.enabled = true;
 
     const el = this.layer;
@@ -93,6 +94,8 @@ export class Controls {
     el.addEventListener('contextmenu', (e) => e.preventDefault());
     const rehome = () => { this.left.home(); this.right.home(); this._placeRocker(); };
     addEventListener('resize', rehome);
+    window.visualViewport?.addEventListener('resize', rehome);
+    document.addEventListener('webkitfullscreenchange', () => setTimeout(rehome, 100));
     addEventListener('orientationchange', () => setTimeout(rehome, 250));
     document.addEventListener('fullscreenchange', () => setTimeout(rehome, 100));
     // keyboard for desktop testing only
@@ -123,6 +126,7 @@ export class Controls {
     const lower = e.clientY > innerHeight * 0.4;
     if (z === 'l' && lower && this.left.id === null) { this.left.down(e); this._cap(e); return; }
     if (z === 'r' && lower && this.right.id === null) { this.right.down(e); this._cap(e); return; }
+    if ((z === 'l' || z === 'r') && lower) return; // stick already held: a 2nd thumb must not grab the look drag
     if (this.look.id === null) {
       const L = this.look; L.id = e.pointerId; L.lx = L.sx = e.clientX; L.ly = L.sy = e.clientY; L.t0 = performance.now(); L.moved = 0;
       this._cap(e);
@@ -160,7 +164,9 @@ export class Controls {
     const surge = clamp(this.left.y + kb('KeyW', 'KeyS'), -1, 1) * p;
     const yaw = clamp(this.left.x + kb('KeyD', 'KeyA'), -1, 1) * p;
     const sway = clamp(this.right.x + kb('KeyE', 'KeyQ'), -1, 1) * p;
-    const heave = clamp(this.right.y + this.heaveBtn + kb('KeyR', 'KeyF'), -1, 1) * (this.heaveBtn && !this.right.y ? 1 : p);
+    // rocker = full-scale vertical thrust; precision mode scales only the analog part (the rocker
+    // was scaled to 40 % whenever the right stick was even slightly deflected)
+    const heave = clamp(this.right.y * p + this.heaveBtn + kb('KeyR', 'KeyF') * p, -1, 1);
     return { surge, yaw, sway, heave };
   }
   get active() { return this.left.id !== null || this.right.id !== null || this.heaveBtn !== 0 || this.keys.size > 0; }

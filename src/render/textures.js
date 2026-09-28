@@ -5,7 +5,12 @@ import * as THREE from 'three';
 const loader = new THREE.TextureLoader();
 const cache = new Map();
 let maxAniso = 8;
-export function setMaxAnisotropy(a) { maxAniso = a; }
+// also applied to already-loaded textures (a quality change used to affect only new ones)
+export function setMaxAnisotropy(a) {
+  if (a === maxAniso) return;
+  maxAniso = a;
+  for (const t of cache.values()) if (t.isTexture && t.anisotropy !== a) { t.anisotropy = a; if (t.image) t.needsUpdate = true; }
+}
 
 function loadImage(url) {
   return new Promise((res, rej) => {

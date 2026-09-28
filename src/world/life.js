@@ -71,7 +71,7 @@ export class MarineSnow {
     u.uCam.value.copy(camPos); u.uT.value = t;
     for (let i = 0; i < 2; i++) {
       const s = spots[i];
-      if (!s || !s.visible) { u.uSpotI.value[i] = 0; continue; }
+      if (!s || !s.visible || s.intensity <= 1) { u.uSpotI.value[i] = 0; continue; }
       s.getWorldPosition(u.uSpotPos.value[i]);
       const tp = (this._tp ||= new THREE.Vector3()); s.target.getWorldPosition(tp);
       u.uSpotDir.value[i].copy(tp).sub(u.uSpotPos.value[i]).normalize();
@@ -350,6 +350,7 @@ export class Life {
     this.timer = 0;
     this.sightings = new Set();
     this.onSighting = null;
+    this.recording = false; // log species only during a dive (title-screen sightings were silently 'discovered')
   }
 
   _makeAngler() {
@@ -472,7 +473,7 @@ export class Life {
       if (G.t > 60 || G.p.distanceTo(subPos) > 150) { G.active = false; G.g.visible = false; }
     }
   }
-  _sight(name) { if (!this.sightings.has(name)) { this.sightings.add(name); this.onSighting?.(name); } }
+  _sight(name) { if (this.recording && !this.sightings.has(name)) { this.sightings.add(name); this.onSighting?.(name); } }
 }
 
 export const SPECIES = {

@@ -69,7 +69,7 @@ function showTitle() {
   menu.innerHTML = '';
   const save = Game.hasSave();
   btn('潜航開始<small>NEW DIVE</small>', 'primary', () => begin(false));
-  if (save) btn(`続きから<small>CONTINUE · ${Math.round(-save.sub.pos[1])} m</small>`, '', () => begin(true));
+  if (save) btn(`続きから<small>CONTINUE · ${Math.max(0, Math.round(-save.sub.pos[1] || 0)).toLocaleString()} m</small>`, '', () => begin(true));
   btn('操作説明<small>HOW TO PLAY</small>', '', help);
   menu.style.display = 'flex';
   scr.querySelector('.load').style.display = 'none';
@@ -121,10 +121,18 @@ game.onEnd = (cause, st, death) => {
 
 game.boot((f, txt) => { ldBar.style.width = `${Math.round(f * 100)}%`; ldTxt.textContent = txt; })
   .then(() => {
+    try { sessionStorage.removeItem('ad-boot-retry'); } catch { /* ignore */ }
     if (params.has('autostart')) begin(params.get('autostart') === 'save');
     else showTitle();
   })
-  .catch((e) => { console.error(e); ldTxt.textContent = '起動エラー: ' + (e?.message || e) + ' — 画質を下げて再読込します'; try { if (game.quality > 0) { localStorage.setItem('ad-quality-v2', '0'); setTimeout(() => location.reload(), 2500); } } catch { /* ignore */ } });
+  .catch((e) => {
+    console.error(e);
+    // fall back to LOW once; ?q= overrides storage, so retrying with it set used to reload forever
+    let retry = false;
+    try { retry = game.quality > 0 && !params.has('q') && !sessionStorage.getItem('ad-boot-retry'); } catch { /* ignore */ }
+    ldTxt.textContent = '起動エラー: ' + (e?.message || e) + (retry ? ' — 画質を下げて再読込します' : ' — ページを再読込してください');
+    if (retry) { try { sessionStorage.setItem('ad-boot-retry', '1'); localStorage.setItem('ad-quality-v2', '0'); } catch { /* ignore */ } setTimeout(() => location.reload(), 2500); }
+  });
 
 // surface otherwise-silent async failures (they used to freeze the boot screen)
 addEventListener('unhandledrejection', (e) => console.warn('unhandled', e.reason));

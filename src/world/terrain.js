@@ -23,6 +23,8 @@ class WorkerPool {
     for (let i = 0; i < count; i++) {
       const w = new Worker(new URL('./terrainWorker.js', import.meta.url), { type: 'module' });
       w.onmessage = (ev) => this._done(w, ev.data);
+      // a throwing worker never returned to the idle pool -> terrain streaming slowly starved
+      w.onerror = (e) => { e.preventDefault?.(); console.warn('terrain worker', e.message); if (w._job != null) this._done(w, { id: w._job, empty: true }); };
       this.workers.push(w);
       this.idle.push(w);
     }
@@ -41,11 +43,13 @@ class WorkerPool {
       if (item.job.cancelled) continue;
       const w = this.idle.pop();
       this.pending.set(item.job.id, item);
+      w._job = item.job.id;
       w.postMessage({ id: item.job.id, ox: item.job.ox, oy: item.job.oy, oz: item.job.oz, n: N, v: item.job.v });
     }
   }
   _done(w, data) {
-    this.idle.push(w);
+    w._job = null;
+    if (!this.idle.includes(w)) this.idle.push(w);
     const item = this.pending.get(data.id);
     this.pending.delete(data.id);
     if (item && !item.job.cancelled) item.cb(data);

@@ -48,9 +48,12 @@ export class Autopilot {
     this._scan = 0;
   }
 
+  // pilot took the VBT valve: the AP stops commanding it (it used to zero a pilot's hold on disengage)
+  releaseBallast() { this._apVbt = false; }
   engage(on = !this.engaged) {
+    if (on && !this.sys.powered('NAV')) { this.sys.msg('航法コンピュータに電源がない — 自動操縦不可', 'warn'); this.engaged = false; return; }
     this.engaged = on;
-    if (!on) { this._navVert = false; this.sub.vbtCmd = 0; }
+    if (!on) { this._navVert = false; if (this._apVbt) this.sub.vbtCmd = 0; this._apVbt = false; }
     if (on) {
       const s = this.sub;
       if (!this.hdg.on && !this.nav.on && !this.station.on) { this.hdg.on = true; this.hdg.target = heading(s.yaw); }
@@ -66,7 +69,7 @@ export class Autopilot {
     if (on && ['depth', 'alt', 'descent', 'ascent'].includes(axis)) for (const k of ['depth', 'alt', 'descent', 'ascent']) if (k !== axis) this[k].on = false;
     if (on && ['hdg', 'nav', 'station'].includes(axis)) for (const k of ['hdg', 'nav', 'station']) if (k !== axis) this[k].on = false;
     if (axis === 'station' && on) { this.station.point.copy(this.sub.pos); if (!this.hdg.on) this.hdg.target = Math.round(heading(this.sub.yaw)); }
-    if (on) this.engaged = true;
+    if (on && !this.engaged) this.engage(true);
     if (on && axis !== 'nav' && ['depth', 'alt', 'descent', 'ascent'].includes(axis)) this._navVert = false;
     if (axis === 'nav' && !on) this._navVert = false;
     this.pid.depth.reset(); this.pid.vz.reset();
@@ -74,12 +77,11 @@ export class Autopilot {
   navTo(poi) {
     this.nav.poi = poi;
     // plan: descend along a glide path, approach standoff above the POI
-    const s = this.sub.pos;
     const tgt = new THREE.Vector3(poi.x, poi.y + 12, poi.z);
     this.nav.wp = [tgt];
     this.nav.idx = 0;
     this.setMode('nav', true);
-    this.depth.on = false; this.alt.on = false; this.descent.on = false;
+    this.depth.on = false; this.alt.on = false; this.descent.on = false; this.ascent.on = false;
     this.navVertical = true;
     this.log.push(`NAV → ${poi.name}`);
   }
@@ -105,7 +107,7 @@ export class Autopilot {
   _sonar(dt) {
     const s = this.sub;
     const ok = this.sys.sensors.sonar && this.sys.powered('SONAR');
-    if (!ok) { this.oas.threat = 0; this.oas.beams = []; return; }
+    if (!ok) { this.oas.threat = 0; this.oas.dist = 999; this.oas.beams.length = 0; return; }
     // ping repetition ~30 Hz of sim time (keeps cost constant under time compression)
     this._sonT = (this._sonT || 0) + dt;
     if (this._sonT < 1 / 30 && this.oas.beams.length) return;
@@ -125,7 +127,8 @@ export class Autopilot {
     let min = 999, br = 0;
     for (const b of beams) if (b.d < min) { min = b.d; br = b.a; }
     this.oas.dist = min; this.oas.bearing = br;
-    const u = Math.max(0.3, s.speed);
+    // closing speed includes vertical motion (descending onto a ledge)
+    const u = Math.max(0.3, s.speed, Math.abs(s.vel.y) * 0.8);
     const ttc = min / u;
     this.oas.threat = THREE.MathUtils.clamp(1 - (ttc - 6) / 20, 0, 1) * (min < this.oas.range ? 1 : 0);
   }
@@ -154,8 +157,11 @@ export class Autopilot {
   _altimeter() {
     const s = this.sub;
     // down-looking DVL beams => altitude
-    const d = raycast(s.pos.x, s.pos.y - 1.7, s.pos.z, 0, -1, 0, 220, 0.8);
-    s.altitude = d < 0 ? 999 : d;
+    // DVL looks down along the hull's own axis (tilts with pitch/roll)
+    const dn = (this._dn ||= new THREE.Vector3()).set(0, -1, 0).applyQuaternion(s.quat);
+    if (dn.y > -0.3) dn.set(0, -1, 0);
+    const d = raycast(s.pos.x, s.pos.y - 1.7, s.pos.z, dn.x, dn.y, dn.z, 220, 0.8);
+    s.altitude = d < 0 ? 999 : d * -dn.y; // vertical height above the seabed
   }
 
   update(dt, pilotInput) {
@@ -168,6 +174,7 @@ export class Autopilot {
     this.m = m;
     const out = { surge: pilotInput.surge, yaw: pilotInput.yaw, heave: pilotInput.heave, sway: pilotInput.sway, pitch: 0 };
     this.warn = '';
+    if (!this.ballastAuto) this._apVbt = false;
     const navPower = sys.powered('NAV');
     if (!navPower && this.engaged) { this.engaged = false; this.nav.on = false; this._navVert = false; sys.msg('航法コンピュータ電源喪失 — 自動操縦 解除', 'alarm'); }
     if (!this.engaged) {
@@ -190,27 +197,31 @@ export class Autopilot {
       desiredYaw = Math.atan2(-dx, -dz);
       // speed schedule: slow down on approach
       const vmax = s.depth > 50 ? 1.6 : 1.3;
-      this.speed.target = THREE.MathUtils.clamp(hd / 40, 0.15, vmax);
-      { const he = Math.abs(wrap(desiredYaw - m.yaw)); if (he > 0.6) this.speed.target *= Math.max(0.1, 1 - (he - 0.6)); }
-      desiredSurge = 'speed';
+      // nav schedule in its own variable: it used to overwrite the pilot's SPD-hold setpoint for good
+      let navSpd = THREE.MathUtils.clamp(hd / 40, 0.15, vmax);
+      { const he = Math.abs(wrap(desiredYaw - m.yaw)); if (he > 0.6) navSpd *= Math.max(0.1, 1 - (he - 0.6)); }
+      this.navSpeed = navSpd;
+      desiredSurge = 'nav';
       // vertical: glide to waypoint depth — limit descent angle, keep altitude > 15 m
       if (this.navVertical) {
         const wpDepth = -wp.y;
         this.depth.target = wpDepth;
         this._navVert = true;
       }
-      if (hd < 8 && (Math.abs(-wp.y - s.depth) < 12 || (this.chartFloor !== undefined && s.depth > -this.chartFloor - 30))) {
+      if (hd < 8 && (Math.abs(-wp.y - m.depth) < 12 || (this.chartFloor !== undefined && m.depth > -this.chartFloor - 30))) {
         if (this.nav.idx < this.nav.wp.length - 1) this.nav.idx++;
         else {
           sys.msg(`目的地到着: ${this.nav.poi?.name || 'WP'} — 定点保持に移行`, 'good');
-          this.setMode('station', true); this.depth.on = true; this.depth.target = s.depth; this._navVert = false; this.nav.on = false;
+          this.setMode('station', true); this.depth.on = true; this.depth.target = Math.round(m.depth); this._navVert = false; this.nav.on = false;
         }
       }
       tags.push('NAV');
-      this.navDist = Math.hypot(dx, dz, -wp.y - s.depth);
+      this.navDist = Math.hypot(dx, dz, -wp.y - m.depth);
     } else if (this.station.on && s.vbody) {
       const p = this.station.point;
-      const d = new THREE.Vector3(p.x - s.pos.x, 0, p.z - s.pos.z).applyQuaternion(s.quat.clone().invert());
+      // body offset about the yaw axis only (pitch/roll leaked vertical error into surge)
+      const cy = Math.cos(s.yaw), sy = Math.sin(s.yaw), ex = p.x - s.pos.x, ez = p.z - s.pos.z;
+      const d = { x: ex * cy - ez * sy, z: ex * sy + ez * cy };
       // d.z negative = point ahead
       if (m.dvl || s.depth < 30) {
         desiredSurge = THREE.MathUtils.clamp(-d.z * 0.25 - (-s.vbody.z) * 0.9, -0.6, 0.6);
@@ -228,10 +239,10 @@ export class Autopilot {
     if (desiredYaw !== null && !ovr(pilotInput.yaw)) {
       const e = wrap(desiredYaw - m.yaw);
       // yaw PID: + yaw input = turn right = negative yaw rate
-      out.yaw = -this.pid.yaw.step(e, dt, s.w.y) * 1.0;
+      out.yaw = -this.pid.yaw.step(e, dt, -s.w.y); // dErr = d(desired-yaw)/dt = -yaw rate (was +: anti-damping)
     }
-    if (desiredSurge === 'speed' && !ovr(pilotInput.surge)) {
-      const tgt = this.speed.target;
+    if ((desiredSurge === 'speed' || desiredSurge === 'nav') && !ovr(pilotInput.surge)) {
+      const tgt = desiredSurge === 'nav' ? this.navSpeed : this.speed.target;
       out.surge = THREE.MathUtils.clamp(0.3 * Math.sign(tgt) * Math.sqrt(Math.abs(tgt) / 1.9) * 2.2 + this.pid.speed.step(tgt - m.u, dt), -1, 1);
       if (!this.nav.on) tags.push('SPD');
     } else if (typeof desiredSurge === 'number' && !ovr(pilotInput.surge)) out.surge = desiredSurge;
@@ -244,6 +255,8 @@ export class Autopilot {
       targetVz = this.descent.rate;
       if (m.dvl && m.alt < 60) targetVz = Math.min(targetVz, Math.max(0.1, (m.alt - 12) / 60));
       if (m.dvl && m.alt < 14) { this.setMode('alt', true, 10); sys.msg('海底接近 — 高度保持 10 m に移行', 'info'); }
+      // no DVL lock: use the bathymetric chart so the descent still stops above the floor (it drove into it)
+      else if (!m.dvl && this.chartFloor !== undefined && m.depth > -this.chartFloor - 40) { this.setMode('depth', true, Math.round(-this.chartFloor - 25)); sys.msg('DVL無 — 海図により深度保持に移行', 'warn'); }
       tags.push('DSC');
     } else if (this.alt.on) {
       if (!m.dvl) { this.warn = 'ALT: DVLボトムロック無 — 深度保持へ'; this.alt.on = false; this.depth.on = true; this.depth.target = Math.round(m.depth); }
@@ -274,9 +287,11 @@ export class Autopilot {
         if (s.grounded || (m.dvl && m.alt < 4)) wantKg = Math.min(wantKg, -20);
         const err = wantKg - s.trimState;
         s.vbtCmd = Math.abs(err) < 10 ? 0 : THREE.MathUtils.clamp(err / 40, -1, 1);
+        this._apVbt = true;
       }
-    }
-    if (this.ascent.on && s.trimState > 0 && sys.powered('HYD')) s.vbtCmd = -1;
+    } else if (this._apVbt) { s.vbtCmd = 0; this._apVbt = false; } // heave override: stop the AP-driven valve (it stayed latched)
+    // ascent keeps pumping until clearly light (stopped at neutral before -> hovered)
+    if (this.ascent.on && s.trimState > -150 && sys.powered('HYD') && this.ballastAuto) { s.vbtCmd = -1; this._apVbt = true; }
     // pitch stabiliser
     out.pitch = this.pid.pitch.step(-s.pitch, dt, -s.w.x) * 0.6;
 
@@ -284,8 +299,9 @@ export class Autopilot {
     if (this.oas.on && this.oas.threat > 0) {
       const th = this.oas.threat;
       out.surge = Math.min(out.surge, 1 - th * 1.4);
-      out.yaw += (this.oas.bearing <= 0 ? 1 : -1) * th * 0.7;
-      out.heave += th * 0.6;
+      // + yaw input = turn right. Obstacle to port (bearing<0) -> turn right; to starboard -> left
+      out.yaw = THREE.MathUtils.clamp(out.yaw + (this.oas.bearing < 0 ? 1 : -1) * th * 0.7, -1, 1);
+      out.heave = THREE.MathUtils.clamp(out.heave + th * 0.6, -1, 1);
       tags.push('OAS');
       if (th > 0.6) this.warn = '障害物回避中';
     }
@@ -293,7 +309,13 @@ export class Autopilot {
     s.input = out;
   }
 
-  serialize() { return { hdg: { ...this.hdg }, depth: { ...this.depth }, alt: { ...this.alt }, speed: { ...this.speed }, engaged: this.engaged }; }
+  serialize() {
+    return {
+      hdg: { ...this.hdg }, depth: { ...this.depth }, alt: { ...this.alt }, speed: { ...this.speed }, descent: { ...this.descent }, ascent: { ...this.ascent },
+      station: { on: this.station.on, point: this.station.point.toArray() }, oas: this.oas.on, ballastAuto: this.ballastAuto, engaged: this.engaged,
+      nav: this.nav.on && this.nav.poi && this.nav.poi.id !== 'home' ? this.nav.poi.id : null,
+    };
+  }
 }
 
 export { POIS };
