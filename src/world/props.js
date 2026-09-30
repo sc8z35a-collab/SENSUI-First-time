@@ -79,9 +79,11 @@ function rock(r, detail, rnd, squash = 1) {
 function ground(x, z, y0) { return groundHeight(x, z, y0 + 40, y0 - 120); }
 
 // --------------------------------------------------------------------- materials (shared)
+// the promise is cached (not the result): the wreck and the mothership build concurrently at boot and each
+// created its own copy of every shared material
 let M = null;
-async function mats() {
-  if (M) return M;
+function mats() { return (M ||= buildMats()); }
+async function buildMats() {
   const [rust, hull, paint, rock1] = await Promise.all([
     pbrMaterial('rust', { repeat: 1, metal: true }),
     pbrMaterial('hull', { repeat: 1, metal: true }),
@@ -108,8 +110,7 @@ async function mats() {
   const black = W(new THREE.MeshStandardMaterial({ color: 0x121212, roughness: 0.5 }));
   const wood = W(new THREE.MeshStandardMaterial({ color: 0x3b2c20, roughness: 0.95 }));
   const glass = W(new THREE.MeshStandardMaterial({ color: 0x222a2e, roughness: 0.1, metalness: 0.5 }));
-  M = { rustW, rustDeep, hullGrey, antifoul, bone, mat, chimney, sulfide, nodule, orange, yellow, steel, coralW, coralO, sponge, worm, plume, black, wood, glass };
-  return M;
+  return { rustW, rustDeep, hullGrey, antifoul, bone, mat, chimney, sulfide, nodule, orange, yellow, steel, coralW, coralO, sponge, worm, plume, black, wood, glass };
 }
 
 // --------------------------------------------------------------------- builders
@@ -354,8 +355,10 @@ const builders = {
     const pts = new THREE.Points(geo, pm); pts.frustumCulled = false;
     g.add(pts);
     ctx.tick.push((t, st) => { pm.uniforms.uT.value = t; pm.uniforms.uCam.value.copy(st.camPos); pm.uniforms.uSpot.value.copy(st.camPos); pm.uniforms.uSpotI.value = st.extLight * 0.6; });
-    // glow at orifices
-    for (const pl of plumes.slice(0, 3)) { const l = new THREE.PointLight(0xff5a10, 2.5 * pl.s, 8, 2); l.position.copy(pl.p); g.add(l); }
+    // glow at orifices: emissive halo sprites instead of PointLights. Adding lights when the POI is built
+    // (and toggling them with its visibility) changed the scene light count -> every material recompiled
+    const glowM = new THREE.SpriteMaterial({ map: glowTexture(), color: 0xff6a20, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, toneMapped: false });
+    for (const pl of plumes.slice(0, 3)) { const sp = new THREE.Sprite(glowM); sp.position.copy(pl.p); sp.scale.setScalar(2.2 * pl.s); g.add(sp); }
   },
 
   // ---------------- manganese nodule field + sea cucumbers + tracks
@@ -444,9 +447,11 @@ const builders = {
     const cam = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.5, 12), m.black); cam.position.set(0.3, 2.2, 0); cam.rotation.z = 1; L.add(cam);
     const strobeM = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
     const strobe = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 6), strobeM); strobe.position.set(0, 4.2, 0); L.add(strobe);
-    const sl = new THREE.PointLight(0xdfefff, 0, 25, 1.5); sl.position.copy(strobe.position); L.add(sl);
+    // flash halo (sprite) rather than a PointLight: see vents
+    const haloM = new THREE.SpriteMaterial({ map: glowTexture(), color: 0xdfefff, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, toneMapped: false, opacity: 0 });
+    const halo = new THREE.Sprite(haloM); halo.position.copy(strobe.position); halo.scale.setScalar(3); L.add(halo);
     L.position.set(poi.x, gy, poi.z); g.add(L);
-    ctx.tick.push((t) => { const on = (t % 2.5) < 0.08; strobeM.color.setScalar(on ? 60 : 0.2); sl.intensity = on ? 40 : 0; });
+    ctx.tick.push((t) => { const on = (t % 2.5) < 0.08; strobeM.color.setScalar(on ? 60 : 0.2); haloM.opacity = on ? 1 : 0; });
     cols.push(new BoxCollider(new THREE.Vector3(poi.x, gy + 1.8, poi.z), new THREE.Vector3(1.4, 2, 1.4)));
   },
 
@@ -509,6 +514,15 @@ function coralGeometry(rnd, scale = 1) {
   return merged;
 }
 
+let _glowTex = null;
+function glowTexture() {
+  if (_glowTex) return _glowTex;
+  const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+  const c = cv.getContext('2d'), gr = c.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.25, 'rgba(255,255,255,0.45)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  c.fillStyle = gr; c.fillRect(0, 0, 64, 64);
+  return (_glowTex = new THREE.CanvasTexture(cv));
+}
 function fanTexture() {
   const cv = document.createElement('canvas'); cv.width = cv.height = 256;
   const c = cv.getContext('2d');
@@ -587,7 +601,7 @@ export class Props {
 }
 
 // mothership hull silhouette at the surface above the dive start
-export async function buildMothership(scene) {
+export async function buildMothership(scene, colliders = null) {
   const m = await mats();
   const g = new THREE.Group();
   const hull = new THREE.Mesh(shipHull(92, 16, 7, { segs: 50 }), m.antifoul);
@@ -603,5 +617,11 @@ export async function buildMothership(scene) {
   g.position.set(-10, 0.6, 150);
   g.rotation.y = 0.5;
   scene.add(g);
+  // hull collider (92 m x 16 m, 7 m draught + skeg): the boat used to pass straight through the ship
+  if (colliders) {
+    const q = new THREE.Quaternion().setFromEuler(g.rotation);
+    colliders.push(new BoxCollider(new THREE.Vector3(0, -2.9, 0).applyQuaternion(q).add(g.position), new THREE.Vector3(7.5, 3.5, 44), q));
+    colliders.push(new BoxCollider(new THREE.Vector3(0, -8, -40).applyQuaternion(q).add(g.position), new THREE.Vector3(0.4, 1.6, 4), q));
+  }
   return g;
 }

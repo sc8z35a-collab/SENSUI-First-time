@@ -1,5 +1,6 @@
 // helpers for canvas-backed textures (placards, labels, MFD screens)
 import * as THREE from 'three';
+import { trackTexture } from '../render/textures.js';
 
 export function canvasTexture(w, h, draw, { srgb = true } = {}) {
   const cv = document.createElement('canvas');
@@ -8,7 +9,7 @@ export function canvasTexture(w, h, draw, { srgb = true } = {}) {
   if (draw) draw(ctx, w, h);
   const t = new THREE.CanvasTexture(cv);
   t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-  t.anisotropy = 8;
+  trackTexture(t); // follows the quality preset (was a fixed 8)
   t.generateMipmaps = true;
   t.minFilter = THREE.LinearMipmapLinearFilter;
   t.userData.ctx = ctx; t.userData.canvas = cv;
@@ -25,5 +26,10 @@ export function placard(text, { w = 256, h = 64, bg = '#d8d2c0', fg = '#111', fo
   });
 }
 
+// analog dial major-tick label: real value with just enough decimals (Math.round gave '0,1,1,2,2' on 0-2)
+export function dialLabel(i, n, max) {
+  const v = (i / n) * max, step = max / n;
+  return Number.isInteger(step) ? String(Math.round(v)) : v.toFixed(step < 0.1 ? 2 : 1);
+}
 export const FONT = '"Rajdhani","Segoe UI","Noto Sans JP",system-ui,sans-serif';
 export const MONO = '"Share Tech Mono","DejaVu Sans Mono",Consolas,monospace';

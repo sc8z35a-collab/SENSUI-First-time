@@ -2,6 +2,8 @@
 
 検証方法: 全ソース (約 8,100 行) 精読 + ヘッドレス再現スクリプト `node tools/test/bugprobe.mjs` + Playwright によるスクリーンショット確認 (844×390, 横画面モバイル)。
 
+**状態: 全 56 件 修正済み** — 回帰チェック `node tools/test/bugprobe.mjs` (ALL PASS)、`node tools/test/roundtrip.mjs` (PASS)。
+
 区分: **[再現]** = スクリプト/描画で実際に再現 / **[画面]** = スクリーンショットで確認 / **[コード]** = コード上で論理的に確定
 
 ## A. シミュレーション・ゲームロジック

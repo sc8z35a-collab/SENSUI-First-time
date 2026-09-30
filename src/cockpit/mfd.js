@@ -7,6 +7,11 @@ import { MONO, FONT } from './canvasTex.js';
 
 const C = { bg: '#02070b', grid: '#0c2330', line: '#1d4c63', txt: '#9fe6ff', dim: '#4d8aa3', ok: '#3dff8a', warn: '#ffb000', alarm: '#ff3b30', white: '#e9f7ff', cyan: '#35d7ff', mag: '#ff5ce1' };
 
+// heading-up chart: world offset (dx, dz) -> boat frame [right (starboard), ahead]. Forward is
+// (-sin yaw, -cos yaw), starboard (cos yaw, -sin yaw). The old rotation had the wrong sign pair, so off north
+// every POI / trail / the mothership was drawn on a wrong bearing.
+export function hdgUp(dx, dz, yaw) { const cs = Math.cos(yaw), sn = Math.sin(yaw); return [dx * cs - dz * sn, -dx * sn - dz * cs]; }
+
 function frame(c, w, h, title, right = '') {
   c.fillStyle = C.bg; c.fillRect(0, 0, w, h);
   // subtle scanlines
@@ -20,7 +25,9 @@ function frame(c, w, h, title, right = '') {
 }
 function txt(c, s, x, y, col = C.txt, size = 16, align = 'left', font = MONO) { c.fillStyle = col; c.font = `bold ${size}px ${font}`; c.textAlign = align; c.textBaseline = 'middle'; c.fillText(s, x, y); }
 function bar(c, x, y, w, h, f, col, bgc = '#0a1a22') { c.fillStyle = bgc; c.fillRect(x, y, w, h); c.fillStyle = col; c.fillRect(x, y, w * Math.max(0, Math.min(1, f)), h); c.strokeStyle = C.line; c.lineWidth = 1; c.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1); }
-const fmt = (v, d = 0) => (Number.isFinite(v) ? v.toFixed(d) : '---');
+// never print a negative zero ('-0.00' on the speed box, '-0' buoyancy)
+const fmt = (v, d = 0) => { if (!Number.isFinite(v)) return '---'; const s = v.toFixed(d); return /^-0(\.0+)?$/.test(s) ? s.slice(1) : s; };
+const sgn = (v, d = 0) => { const s = fmt(v, d); return v > 0 && s !== fmt(0, d) ? '+' + s : s; };
 const lvlCol = (v, w, a, inv = false) => (inv ? (v < a ? C.alarm : v < w ? C.warn : C.ok) : (v > a ? C.alarm : v > w ? C.warn : C.ok));
 
 export class MFDRenderer {
@@ -49,7 +56,7 @@ export class MFDRenderer {
       const page = id === 'lss' ? 'LSS' : id === 'cam' ? 'CAM' : this.pages[id];
       this['draw' + page](c, m.w, m.h, st);
       // flicker on low bus voltage
-      m.mesh.material.color.setScalar(st.sys.flash > 0 || (st.sub.floodL > 200 && Math.random() < 0.08) ? 0.4 : 1.25);
+      m.mesh.material.color.setScalar((st.sys.flash > 0 && Math.random() < 0.5) || (st.sub.floodL > 200 && Math.random() < 0.08) ? 0.4 : 1.25);
       m.tex.needsUpdate = true;
     }
   }
@@ -96,7 +103,7 @@ export class MFDRenderer {
     for (let k = -4; k <= 4; k++) {
       const dv = Math.round(dep / 10) * 10 + k * 10;
       const y = 150 + (dv - dep) * 2.2;
-      if (y < 58 || y > 242) continue;
+      if (y < 58 || y > 242 || dv < 0) continue; // no negative-depth ticks above the surface
       c.strokeStyle = C.dim; c.beginPath(); c.moveTo(w - 110, y); c.lineTo(w - 96, y); c.stroke();
       txt(c, String(dv), w - 20, y, C.dim, 13, 'right');
     }
@@ -115,7 +122,7 @@ export class MFDRenderer {
     txt(c, m.dvl ? fmt(m.alt, 1) + ' m' : 'NO LOCK', 58, 226, m.dvl ? (m.alt < 5 ? C.alarm : m.alt < 12 ? C.warn : C.ok) : C.warn, 15, 'center');
     // bottom strip
     const B = -sub.trimState; // + = positively buoyant (read '+-50' before)
-    txt(c, `BUOY ${B > 0 ? '+' : ''}${fmt(B, 0)} kg`, 12, h - 44, Math.abs(B) > 150 ? C.warn : C.txt, 14);
+    txt(c, `BUOY ${sgn(B, 0)} kg`, 12, h - 44, Math.abs(B) > 150 ? C.warn : C.txt, 14);
     txt(c, `VBT ${fmt(sub.vbt)} L ${sub.vbtFlow > 0 ? '注水' : sub.vbtFlow < 0 ? '排水' : ''}`, 12, h - 24, C.txt, 14);
     txt(c, `TRIM ${fmt(sub.trim * 100)}%`, cx, h - 44, C.txt, 14, 'center');
     txt(c, `WT D${sub.weights.descent} A${sub.weights.ascent}`, cx, h - 24, C.txt, 14, 'center');
@@ -134,13 +141,12 @@ export class MFDRenderer {
     c.strokeStyle = C.grid; c.lineWidth = 1;
     for (let r = 1; r <= 4; r++) { c.beginPath(); c.arc(cx, cy, (r / 4) * R * sc, 0, Math.PI * 2); c.stroke(); }
     // heading-up display
-    const yaw = sub.yaw;
-    const toScr = (x, z) => { const dx = x - sub.pos.x, dz = z - sub.pos.z; const cs = Math.cos(-yaw), sn = Math.sin(-yaw); const rx = dx * cs - dz * sn, rz = dx * sn + dz * cs; return [cx + rx * sc, cy + rz * sc]; };
+    const toScr = (x, z) => { const [r, a] = hdgUp(x - sub.pos.x, z - sub.pos.z, sub.yaw); return [cx + r * sc, cy - a * sc]; };
     // POIs
     for (const p of POIS) {
       const [x, y] = toScr(p.x, p.z);
       const dd = Math.hypot(p.x - sub.pos.x, p.z - sub.pos.z);
-      if (dd > R * 1.5) {
+      if (dd > R) { // outside the outer range ring (was 1.5 R: drawn over the header)
         // edge arrow
         const a = Math.atan2(y - cy, x - cx);
         const ex = cx + Math.cos(a) * (h / 2 - 34), ey = cy + Math.sin(a) * (h / 2 - 34);
@@ -201,7 +207,8 @@ export class MFDRenderer {
       const x = 12 + i * 100, y = 36;
       txt(c, `BATT ${n}`, x, y + 6, b.online ? C.txt : C.alarm, 13);
       bar(c, x, y + 16, 88, 14, b.soc, b.soc < 0.15 ? C.alarm : b.soc < 0.3 ? C.warn : C.ok);
-      txt(c, `${fmt(b.soc * 100)}%`, x + 44, y + 23, '#001', 11, 'center');
+      // dark text only on a bar filled past its middle, else light text over the empty dark track
+      txt(c, `${fmt(b.soc * 100)}%`, x + 44, y + 23, b.soc > 0.55 ? '#001' : C.white, 11, 'center');
       txt(c, `${fmt(b.v, 0)}V ${fmt(b.temp, 0)}°C`, x, y + 42, b.temp > 55 ? C.alarm : b.fault ? C.warn : C.dim, 12);
     });
     txt(c, sys.cross ? 'X-TIE ON' : 'X-TIE OFF', w - 12, 42, sys.cross ? C.warn : C.dim, 12, 'right');

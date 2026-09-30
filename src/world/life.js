@@ -10,6 +10,10 @@ import { applyWater } from '../render/water.js';
 import { groundHeight } from './density.js';
 
 const rnd = Math.random;
+// per-frame scratch (up to ~500 fish x 60 fps: no allocations in the update loops)
+const _toSub = new THREE.Vector3(), _wander = new THREE.Vector3(), _slot = new THREE.Vector3(), _dir = new THREE.Vector3(), _neg = new THREE.Vector3(), _scale = new THREE.Vector3();
+const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _e = new THREE.Euler(), _origin = new THREE.Vector3(), _UP = new THREE.Vector3(0, 1, 0);
+const _fwd = new THREE.Vector3(), _rel = new THREE.Vector3();
 
 // ------------------------------------------------------------------ marine snow
 export class MarineSnow {
@@ -194,6 +198,7 @@ function fishMaterial(color, { metal = 0.6, rough = 0.35, photophores = 0, eyeGl
 class School {
   constructor(scene, opt) {
     Object.assign(this, opt);
+    this.glow = !!(opt.mat?.photophores || opt.mat?.eyeGlow); // bioluminescent: visible a little in the dark
     this.geo = fishGeometry(opt.len, opt.len * opt.hK, opt.len * opt.wK);
     this.mat = fishMaterial(opt.color, opt.mat);
     this.mesh = new THREE.InstancedMesh(this.geo, this.mat, opt.n);
@@ -222,18 +227,19 @@ class School {
   update(dt, t, subPos, subVel, lightOn) {
     if (!this.active) return;
     this.age += dt;
-    const toSub = this.center.clone().sub(subPos);
+    const toSub = _toSub.copy(this.center).sub(subPos);
     const d = toSub.length();
+    this.dist = d;
+    if (d > 1e-6) toSub.divideScalar(d);
     // wander
-    const wander = new THREE.Vector3(Math.sin(t * 0.13 + this.seed) , Math.sin(t * 0.07 + this.seed * 2) * 0.2, Math.cos(t * 0.11 + this.seed));
-    this.vel.addScaledVector(wander, dt * 0.3);
+    this.vel.addScaledVector(_wander.set(Math.sin(t * 0.13 + this.seed), Math.sin(t * 0.07 + this.seed * 2) * 0.2, Math.cos(t * 0.11 + this.seed)), dt * 0.3);
     // flee from the sub (and more if lights are on for light-shy species)
     const scare = this.shy * (lightOn ? 1.6 : 0.6);
-    if (d < 18 * scare) { this.vel.addScaledVector(toSub.normalize(), dt * 2.2); this.flee = 1; } else this.flee = Math.max(0, this.flee - dt);
+    if (d < 18 * scare) { this.vel.addScaledVector(toSub, dt * 2.2); this.flee = 1; } else this.flee = Math.max(0, this.flee - dt);
     // curious species approach
-    if (this.curious && d > 12 && d < 50) this.vel.addScaledVector(toSub.clone().normalize(), -dt * 0.4);
+    if (this.curious && d > 12 && d < 50) this.vel.addScaledVector(toSub, -dt * 0.4);
     // keep near-ish the sub so the player sees them, keep depth band
-    if (d > 70) this.vel.addScaledVector(toSub.normalize(), -dt * 0.6);
+    if (d > 70) this.vel.addScaledVector(toSub, -dt * 0.6);
     const sp = this.speed * (1 + this.flee * 1.8);
     this.vel.y *= 0.96;
     if (this.vel.length() > sp) this.vel.setLength(sp);
@@ -241,17 +247,17 @@ class School {
     if (this.bottom && ((t * 10) | 0) % 10 === 0) { const gy = groundHeight(this.center.x, this.center.z, this.center.y + 20, this.center.y - 60); if (this.center.y < gy + 1.5) this.center.y = gy + 1.5; if (this.center.y > gy + 6) this.center.y -= dt; }
     if (this.center.y > -2) this.center.y = -2;
     // individuals follow slots with lag
-    const up = new THREE.Vector3(0, 1, 0);
+    const k = this.spread * 0.12;
     for (let i = 0; i < this.fish.length; i++) {
       const f = this.fish[i];
-      const slot = this.center.clone().add(f.o).add(new THREE.Vector3(Math.sin(t * 0.8 + f.ph) * 0.4, Math.sin(t * 0.6 + f.ph * 1.3) * 0.2, Math.cos(t * 0.7 + f.ph)).multiplyScalar(this.spread * 0.12));
-      const want = slot.sub(f.p).multiplyScalar(1.2).add(this.vel);
+      const want = _slot.set(Math.sin(t * 0.8 + f.ph) * 0.4 * k, Math.sin(t * 0.6 + f.ph * 1.3) * 0.2 * k, Math.cos(t * 0.7 + f.ph) * k)
+        .add(this.center).add(f.o).sub(f.p).multiplyScalar(1.2).add(this.vel);
       f.v.lerp(want, Math.min(1, dt * 2.5));
       f.p.addScaledVector(f.v, dt);
-      const dir = f.v.lengthSq() > 1e-4 ? f.v.clone().normalize() : new THREE.Vector3(0, 0, -1);
-      const m = new THREE.Matrix4().lookAt(new THREE.Vector3(), dir.clone().negate(), up);
-      this.q.setFromRotationMatrix(m);
-      this.m4.compose(f.p, this.q, new THREE.Vector3(f.s, f.s, f.s));
+      if (f.v.lengthSq() > 1e-4) _dir.copy(f.v).normalize(); else _dir.set(0, 0, -1);
+      _m4.lookAt(_origin, _neg.copy(_dir).negate(), _UP);
+      this.q.setFromRotationMatrix(_m4);
+      this.m4.compose(f.p, this.q, _scale.setScalar(f.s));
       this.mesh.setMatrixAt(i, this.m4);
     }
     this.mesh.instanceMatrix.needsUpdate = true;
@@ -365,7 +371,9 @@ export class Life {
     g.add(rod);
     const lureM = new THREE.MeshBasicMaterial({ color: 0x9fe8ff, toneMapped: false });
     const lure = new THREE.Mesh(new THREE.SphereGeometry(0.04, 12, 8), lureM); lure.position.set(0, 0.52, -0.72); g.add(lure);
-    const light = new THREE.PointLight(0x7fe0ff, 0.6, 3, 2); light.position.copy(lure.position); g.add(light);
+    // the lure light lives directly in the scene and is only dimmed: hiding it with the fish changed the
+    // light count and recompiled every material each time an anglerfish (de)spawned
+    const light = new THREE.PointLight(0x7fe0ff, 0, 3, 2); this.scene.add(light);
     const tail = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.4, 4), body.material); tail.rotation.x = -Math.PI / 2; tail.position.z = 0.5; tail.scale.x = 0.2; g.add(tail);
     g.visible = false;
     return { g, lureM, light, active: false, p: new THREE.Vector3(), yaw: 0 };
@@ -400,23 +408,30 @@ export class Life {
       if (cands.length && this.schools.filter((s) => s.active).length < 4) {
         const s = cands[(rnd() * cands.length) | 0];
         s.spawn(subPos);
-        this._sight(s.name);
       }
       // jellies
       for (const j of this.jellies) {
         if (!j.mesh.visible && depth >= j.dmin && depth <= j.dmax && rnd() < 0.4) {
           j.mesh.visible = true;
           for (const it of j.items) { it.p.set(subPos.x + (rnd() - 0.5) * 60, subPos.y + (rnd() - 0.5) * 30, subPos.z + (rnd() - 0.5) * 60); it.p.y = Math.min(it.p.y, -3); }
-          this._sight(j.name);
         }
       }
-      if (!this.siphState.active && depth > 600 && depth < 3000 && rnd() < 0.15) { this.siphState.active = true; this.siphState.p.set(subPos.x + 25 * (rnd() - 0.5), subPos.y - 5 + rnd() * 10, subPos.z + 25 * (rnd() - 0.5)); this.siph.visible = true; this._sight('siphonophore'); }
-      if (!this.angler.active && depth > 1000 && depth < 4000 && rnd() < 0.2) { this.angler.active = true; this.angler.g.visible = true; const f = new THREE.Vector3(0, 0, -1).applyQuaternion(st.subQuat); this.angler.p.copy(subPos).addScaledVector(f, 14).add(new THREE.Vector3((rnd() - 0.5) * 6, -1.5 + rnd() * 3, (rnd() - 0.5) * 6)); this._sight('anglerfish'); }
-      if (!this.giant.active && depth > 400 && depth < 1200 && rnd() < 0.05) { this.giant.active = true; this.giant.g.visible = true; this.giant.t = 0; const f = new THREE.Vector3(0, 0, -1).applyQuaternion(st.subQuat); this.giant.p.copy(subPos).addScaledVector(f, 30).add(new THREE.Vector3(-20, -3, 0)); this.giant.dir = new THREE.Vector3(1, 0.05, 0.2).normalize(); this._sight('giantsquid'); }
+      if (!this.siphState.active && depth > 600 && depth < 3000 && rnd() < 0.15) { this.siphState.active = true; this.siphState.p.set(subPos.x + 25 * (rnd() - 0.5), subPos.y - 5 + rnd() * 10, subPos.z + 25 * (rnd() - 0.5)); this.siph.visible = true; }
+      if (!this.angler.active && depth > 1000 && depth < 4000 && rnd() < 0.2) { this.angler.active = true; this.angler.g.visible = true; const f = new THREE.Vector3(0, 0, -1).applyQuaternion(st.subQuat); this.angler.p.copy(subPos).addScaledVector(f, 14).add(new THREE.Vector3((rnd() - 0.5) * 6, -1.5 + rnd() * 3, (rnd() - 0.5) * 6)); }
+      if (!this.giant.active && depth > 400 && depth < 1200 && rnd() < 0.05) { this.giant.active = true; this.giant.g.visible = true; this.giant.t = 0; const f = new THREE.Vector3(0, 0, -1).applyQuaternion(st.subQuat); this.giant.p.copy(subPos).addScaledVector(f, 30).add(new THREE.Vector3(-20, -3, 0)); this.giant.dir = new THREE.Vector3(1, 0.05, 0.2).normalize(); }
     }
-    for (const s of this.schools) s.update(dt, t, subPos, subVel, lightOn);
+    // sighting = the animal is in front of the viewports and close enough to be visible: within the
+    // lamp throw when the lights are on, or where it is bright/bioluminescent enough on its own
+    _fwd.set(0, 0, -1); if (st?.subQuat) _fwd.applyQuaternion(st.subQuat);
+    const ambient = depth < 200 ? 30 * (1 - depth / 200) : 0;
+    const seen = (p, range) => { _rel.copy(p).sub(subPos); const d = _rel.length(); return d < Math.max(ambient, range) && (d < 4 || _rel.dot(_fwd) > d * 0.35); };
+    const lampR = lightOn ? 22 : 0;
+    for (const s of this.schools) {
+      s.update(dt, t, subPos, subVel, lightOn);
+      if (s.active && !this.sightings.has(s.name) && seen(s.center, lampR + (s.glow ? 10 : 0))) this._sight(s.name);
+    }
     // jellies drift
-    const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+    const m4 = _m4, q = _q, sc = _scale;
     for (const j of this.jellies) {
       if (!j.mesh.visible) continue;
       j.mat.userData.uT.value = t;
@@ -424,11 +439,12 @@ export class Life {
       let far = 0;
       j.items.forEach((it, i) => {
         const d = it.p.distanceTo(subPos);
+        if (!this.sightings.has(j.name) && seen(it.p, lampR + 8)) this._sight(j.name); // glowing bells
         if (d < 6 && j.flash < 0.1) j.flash = 1;
         it.p.y += Math.max(0, Math.sin(t * 1.7 + i)) * dt * 0.12 - dt * 0.02;
         it.p.x += Math.sin(t * 0.1 + i) * dt * 0.05;
         if (d > 90) far++;
-        q.setFromEuler(new THREE.Euler(Math.sin(t * 0.2 + i) * 0.2, it.rot, Math.cos(t * 0.17 + i) * 0.2));
+        q.setFromEuler(_e.set(Math.sin(t * 0.2 + i) * 0.2, it.rot, Math.cos(t * 0.17 + i) * 0.2));
         sc.setScalar(it.s);
         m4.compose(it.p, q, sc); j.mesh.setMatrixAt(i, m4);
       });
@@ -441,9 +457,10 @@ export class Life {
     // siphonophore chain
     if (this.siphState.active) {
       const S = this.siphState;
+      if (seen(S.p, lampR + 12)) this._sight('siphonophore');
       S.p.addScaledVector(S.dir, dt * 0.05);
       for (let i = 0; i < this.siph.count; i++) {
-        const p = S.p.clone().add(new THREE.Vector3(i * 0.12, Math.sin(i * 0.15 + t * 0.4) * 0.6, Math.cos(i * 0.1 + t * 0.3) * 0.8));
+        const p = _slot.set(i * 0.12, Math.sin(i * 0.15 + t * 0.4) * 0.6, Math.cos(i * 0.1 + t * 0.3) * 0.8).add(S.p);
         const s = i < 5 ? 1.8 : 0.6 + Math.sin(i * 1.7) * 0.3;
         m4.compose(p, q.identity(), sc.setScalar(s)); this.siph.setMatrixAt(i, m4);
       }
@@ -454,17 +471,20 @@ export class Life {
     // anglerfish hovers & slowly turns toward the sub, lure flickers
     if (this.angler.active) {
       const A = this.angler;
+      if (seen(A.p, lampR + 6)) this._sight('anglerfish'); // the lure glows
       const to = subPos.clone().sub(A.p);
       A.yaw += (Math.atan2(-to.x, -to.z) - A.yaw) * dt * 0.3;
       A.g.position.copy(A.p).add(new THREE.Vector3(0, Math.sin(t * 0.8) * 0.1, 0));
       A.g.rotation.set(Math.sin(t * 0.5) * 0.05, A.yaw, 0);
       const fl = 0.6 + 0.4 * Math.sin(t * 2.3) * Math.sin(t * 5.1);
       A.lureM.color.setRGB(0.6, 0.9, 1).multiplyScalar(4 + fl * 6); A.light.intensity = 0.4 + fl * 0.5;
+      A.light.position.set(0, 0.52, -0.72).applyEuler(A.g.rotation).add(A.g.position);
       if (to.length() < 4) A.p.addScaledVector(to.normalize(), -dt * 2);
-      if (to.length() > 60) { A.active = false; A.g.visible = false; }
+      if (to.length() > 60) { A.active = false; A.g.visible = false; A.light.intensity = 0; }
     }
     if (this.giant.active) {
       const G = this.giant;
+      if (seen(G.p, lampR + 8)) this._sight('giantsquid');
       G.t += dt;
       G.p.addScaledVector(G.dir, dt * 1.1);
       G.g.position.copy(G.p);

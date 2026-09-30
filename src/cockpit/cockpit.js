@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { pbrMaterial, paintedMaterial, weathered, tex } from '../render/textures.js';
-import { canvasTexture, placard, FONT, MONO } from './canvasTex.js';
+import { canvasTexture, placard, dialLabel, FONT, MONO } from './canvasTex.js';
 import { BREAKERS } from '../sim/systems.js';
 import { buildOutfit } from './outfit.js';
 
@@ -19,6 +19,8 @@ export const VIEWPORTS = [
   { dir: new THREE.Vector3(0.82, -0.28, -0.5).normalize(), half: 0.2 },
   { dir: new THREE.Vector3(0, -0.93, -0.36).normalize(), half: 0.17 },
 ];
+
+const _wE = new THREE.Euler(), _wFlat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
 
 function shellMaterial(base) {
   base.onBeforeCompile = (sh) => {
@@ -303,7 +305,10 @@ export class Cockpit {
           const L = i % 5 === 0 ? 18 : 9;
           c.lineWidth = i % 5 === 0 ? 3 : 1.5;
           c.beginPath(); c.moveTo(128 + Math.cos(a) * 110, 128 + Math.sin(a) * 110); c.lineTo(128 + Math.cos(a) * (110 - L), 128 + Math.sin(a) * (110 - L)); c.stroke();
-          if (i % 5 === 0) { c.font = `bold 20px ${MONO}`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(String(Math.round((i / (ticks * 5)) * max)), 128 + Math.cos(a) * 72, 128 + Math.sin(a) * 72); }
+          if (i % 5 === 0) {
+            const lbl = dialLabel(i / 5, ticks, max); // every major tick shows its real value
+            c.font = `bold ${lbl.length > 3 ? 16 : 20}px ${MONO}`; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(lbl, 128 + Math.cos(a) * 72, 128 + Math.sin(a) * 72);
+          }
         }
         c.font = `bold 20px ${FONT}`; c.fillStyle = '#f2b400'; c.fillText(label, 128, 170); c.fillStyle = '#9aa'; c.font = `14px ${MONO}`; c.fillText(unit, 128, 192);
       });
@@ -491,6 +496,15 @@ export class Cockpit {
     const bus = new THREE.Group(); bus.position.set(0.45, -0.55, 0.05); S.add(bus);
     for (let i = 0; i < 3; i++) { const bb = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.01, 0.02), copper); bb.position.set(0, i * 0.03, 0); bus.add(bb); }
     this.busBarPos = new THREE.Vector3(0.45, -0.52, 0.05);
+    // where each circuit's electronics sit (sphere frame): a fire / fault sparks at its own panel,
+    // not always at the lower-starboard bus bar
+    this.sphere.updateMatrixWorld(true);
+    const inSphere = (obj, x, y, z) => this.sphere.worldToLocal(obj.localToWorld(new THREE.Vector3(x, y, z)));
+    this.panelPos = {
+      NAV: inSphere(this.console, 0, 0.1, -0.1), SONAR: inSphere(this.console, 0.4, 0.1, -0.08), CAM: inSphere(this.console, 0.4, 0.1, -0.08),
+      CABIN: onSphere(new THREE.Vector3(-0.42, 0.85, 0.1), SPHERE_R - 0.08), HEAT: new THREE.Vector3(-0.35, -0.55, 0.35),
+      LSS: new THREE.Vector3(-0.55, -0.35, 0.55), COMMS: onSphere(new THREE.Vector3(-0.35, 0.3, 0.88), SPHERE_R - 0.1),
+    };
     // interior placards / warnings
     const warnP = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.07), new THREE.MeshStandardMaterial({ map: placard('最大運用深度 11,000 m', { w: 512, h: 160, bg: '#f2b400', fg: '#111', font: `bold 46px "Noto Sans JP"`, sub: 'MAX OPERATING DEPTH — DSV-11 WADATSUMI' }), roughness: 0.6 }));
     warnP.position.copy(onSphere(new THREE.Vector3(0, 0.55, -0.83), SPHERE_R - 0.03)); warnP.lookAt(0, 0.1, 0.3); S.add(warnP);
@@ -527,19 +541,39 @@ export class Cockpit {
         void main(){ vL = life; vK = kind; vec4 mv = modelViewMatrix * vec4(position,1.0); gl_Position = projectionMatrix * mv;
           gl_PointSize = life > 0.0 ? size * uPR * (1.0 / -mv.z) : 0.0; }`,
       fragmentShader: `varying float vL; varying float vK; void main(){ vec2 c = gl_PointCoord - 0.5; float r = length(c); if (r > 0.5 || vL <= 0.0) discard;
+        #ifdef PASS_ADD
+        if (vK > 1.5) discard;
+        #endif
+        #ifdef PASS_SMOKE
+        if (vK < 1.5) discard;
+        #endif
         vec3 col; float a;
         if (vK < 0.5) { col = vec3(0.55, 0.7, 0.78) * 0.9; a = smoothstep(0.5, 0.1, r) * 0.55 * min(1.0, vL * 3.0); }
         else if (vK < 1.5) { col = mix(vec3(1.0, 0.5, 0.1), vec3(1.0, 0.95, 0.7), vL) * 18.0; a = smoothstep(0.5, 0.0, r) * vL; }
         else { col = vec3(0.07, 0.065, 0.06); a = smoothstep(0.5, 0.0, r) * 0.35 * min(1.0, vL); }
-        gl_FragColor = vec4(col * a, a); }`,
+        #ifdef PASS_SMOKE
+        gl_FragColor = vec4(col, a);
+        #else
+        gl_FragColor = vec4(col * a, a);
+        #endif
+      }`,
     });
     this.pMat = mat;
-    this.smokeMat = mat.clone(); this.smokeMat.blending = THREE.NormalBlending;
+    // smoke is dark: additive blending made it (near) invisible. Same buffers drawn a second time with
+    // normal blending; each pass discards the other's particle kind.
+    mat.defines = { PASS_ADD: 1 };
+    this.smokeMat = mat.clone(); this.smokeMat.blending = THREE.NormalBlending; this.smokeMat.defines = { PASS_SMOKE: 1 };
+    this.smokeMat.uniforms = mat.uniforms; // share uPR
     this.particles = new THREE.Points(geo, mat);
     this.particles.frustumCulled = false; this.particles.renderOrder = 20;
     this.sphere.add(this.particles);
+    this.smoke = new THREE.Points(geo, this.smokeMat);
+    this.smoke.frustumCulled = false; this.smoke.renderOrder = 19;
+    this.sphere.add(this.smoke);
     this.pN = N; this.pNext = 0;
   }
+  // spark / smoke origin for a circuit (falls back to the main bus bars)
+  sparkPos(id) { return (id && this.panelPos?.[id]) || this.busBarPos; }
   setShadows(on) { if (this.keyLight) this.keyLight.castShadow = !!on; }
   emit(kind, pos, vel, life, size) {
     const i = this.pNext; this.pNext = (this.pNext + 1) % this.pN;
@@ -570,8 +604,9 @@ export class Cockpit {
       this.water.position.y = y;
       const r = Math.sqrt(Math.max(0.0001, R * R - y * y)) - 0.01;
       this.water.scale.set(r, r, 1);
-      // keep level with gravity (counter sub pitch/roll)
-      this.water.rotation.set(-Math.PI / 2 - sub.pitch, 0, sub.roll);
+      // keep level with gravity: undo the hull's pitch (about x) and roll (about z) *before* laying the disc
+      // flat. The old 'XYZ' Euler put the roll in the disc's own normal axis (roll compensation did nothing)
+      this.water.quaternion.setFromEuler(_wE.set(-sub.pitch, 0, -sub.roll, 'ZXY')).multiply(_wFlat);
       if (this.water.material.userData.shader) this.water.material.userData.shader.uniforms.uT.value = t;
     } else this.water.visible = false;
 
@@ -592,8 +627,9 @@ export class Cockpit {
     }
     // fire: sparks + smoke puffs near the source
     if (sys.fire.active) {
-      if (Math.random() < dt * (4 + sys.fire.intensity * 20)) this.sparks(this.busBarPos, 6 + (Math.random() * 12) | 0);
-      if (Math.random() < dt * 20 * sys.fire.intensity) this.emit(2, this.busBarPos, new THREE.Vector3((Math.random() - 0.5) * 0.2, 0.25, (Math.random() - 0.5) * 0.2), 3, 180);
+      const fp = this.sparkPos(sys.fire.loc);
+      if (Math.random() < dt * (4 + sys.fire.intensity * 20)) this.sparks(fp, 6 + (Math.random() * 12) | 0);
+      if (Math.random() < dt * 20 * sys.fire.intensity) this.emit(2, fp, new THREE.Vector3((Math.random() - 0.5) * 0.2, 0.25, (Math.random() - 0.5) * 0.2), 3, 180);
     }
     if (st.sparkBurst) { this.sparks(st.sparkBurst, 40); st.sparkBurst = null; }
     for (let i = 0; i < this.pN; i++) {
@@ -650,7 +686,7 @@ export class Cockpit {
     setLed('SPD', ap.speed.on && ap.engaged); setLed('STN', ap.station.on && ap.engaged); setLed('NAV', ap.nav.on && ap.engaged); setLed('OAS', ap.oas.on, ap.oas.threat > 0.3 ? 0xff3300 : 0x00ff66);
     setLed('LT1', sys.lights.main > 0 && sys.powered('LIGHT'), 0xffffff); setLed('LT2', sys.lights.flood > 0 && sys.powered('LIGHT'), 0xffffff);
     setLed('VBT', sub.vbtCmd !== 0, sub.vbtCmd > 0 ? 0x33aaff : 0xffaa00); setLed('TRM', sub.trimCmd !== 0, 0xffaa00);
-    setLed('ALM', alarm > 0 && Math.sin(t * 8) > 0, 0xff2200); setLed('CAM', sys.powered('CAM'), 0x33ff66);
+    setLed('ALM', alarm > 0 && Math.sin(t * 8) > 0, 0xff2200); setLed('CAM', st.lasers && sys.powered('CAM'), 0x33ff66); // the CAM button toggles the laser scalers
     // annunciators
     const warnOn = alarm > 1 && Math.sin(t * 7) > -0.2, cautOn = alarm > 0;
     this.annWarn.material[4].color.setScalar(warnOn ? 6 : 0.15);
@@ -664,7 +700,8 @@ export class Cockpit {
     // gauges
     const needle = (name, v) => { const G = this.gauges[name]; const f = THREE.MathUtils.clamp(v / G.max, 0, 1.02); const target = -(Math.PI * 0.75 + f * Math.PI * 1.5) + Math.PI / 2 + Math.PI; G.pivot.rotation.z += (target - G.pivot.rotation.z) * Math.min(1, dt * 6); };
     needle('depth', sub.depth + sys.sensors.depthDrift * 0.2);
-    needle('o2', sys.o2RegOK && sys.o2Bottles > 0 && sys.powered('LSS') ? sys.o2Flow + Math.sin(t * 3) * 0.01 : 0);
+    // flow through the regulator or the mechanical bypass (the needle sat at 0 during bypass feed)
+    needle('o2', (sys._bypass || (sys.o2RegOK && sys.powered('LSS'))) && sys.o2Bottles > 0 ? sys.o2Flow + Math.sin(t * 3) * 0.01 : 0);
     needle('cabinP', sys.cabinP);
     needle('volt', sys.bat.A.online ? sys.bat.A.v : sys.bat.B.online ? sys.bat.B.v : 0);
     // joystick & wheel

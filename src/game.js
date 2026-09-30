@@ -24,6 +24,14 @@ import { QUALITY } from './core/quality.js';
 
 export { QUALITY };
 
+// resolve the web fonts used by canvas textures (bounded: never block boot for more than ~3 s)
+async function loadFonts() {
+  if (typeof document === 'undefined' || !document.fonts?.load) return;
+  const want = ['600 20px "Rajdhani"', '700 20px "Rajdhani"', '20px "Share Tech Mono"', 'bold 20px "Share Tech Mono"', '700 20px "Noto Sans JP"', '400 20px "Noto Sans JP"'];
+  const sample = '深度酸素緊急呼吸器スクラバー最大運用 ABC0123';
+  await Promise.race([Promise.all(want.map((f) => document.fonts.load(f, sample).catch(() => {}))), new Promise((r) => setTimeout(r, 3000))]);
+}
+
 const SAVE_KEY = 'abyssal-descent-save-v1';
 const QKEY = 'ad-quality-v2';
 function loadQuality() {
@@ -37,6 +45,9 @@ const DEATH = {
   flooded: ['浸水による水没', 'FLOODED', '耐圧殻内が海水で満たされた。'],
   hypoxia: ['低酸素症', 'HYPOXIA', '艦内の酸素濃度が生存限界を下回った。'],
   co2: ['二酸化炭素中毒', 'CO2 POISONING', 'CO2濃度が致死量に達した。'],
+  smoke: ['煙による中毒', 'SMOKE INHALATION', '火災の煙を吸い込み、意識を失った。'],
+  hypothermia: ['低体温症', 'HYPOTHERMIA', '艦内温度の低下により体温を維持できなかった。'],
+  pressure: ['艦内過圧', 'CABIN OVERPRESSURE', '浸水で圧縮された艦内気圧に身体が耐えられなかった。'],
   power: ['全電源喪失', 'TOTAL POWER LOSS', '全バッテリーが枯渇し、生命維持が停止した。'],
 };
 
@@ -58,7 +69,7 @@ export class Game {
     this.radioQueue = [];
     this._milestones = new Set();
     this._acc = 0;
-    this._clock = new THREE.Clock(false);
+    this._clock = new THREE.Timer(); // THREE.Clock is deprecated since r183 (warned on every boot)
     this._t = 0;
     this._saveT = 20;
     this._headOff = new THREE.Vector3();
@@ -84,6 +95,8 @@ export class Game {
     this.hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 0.8); this.scene.add(this.hemi);
     this.sun = new THREE.DirectionalLight(0xffffff, 2.5); this.sun.position.set(30, 100, 20); this.scene.add(this.sun); this.scene.add(this.sun.target);
     progress(0.05, 'シミュレーション初期化');
+    // MFD / placard canvases are drawn once during the build: make sure the fonts are there first
+    await loadFonts();
 
     this.sub = new Submarine();
     this.sys = new Systems(this.sub);
@@ -106,7 +119,7 @@ export class Game {
     this.life = new Life(this.scene);
     this.props = new Props(this.scene);
     this.sub.propColliders = this.props.colliders;
-    try { this.mothership = await buildMothership(this.scene); } catch (e) { console.warn(e); }
+    try { this.mothership = await buildMothership(this.scene, this.props.colliders); } catch (e) { console.warn(e); }
 
     // UI
     this.controls = new Controls(this.ui, { onTap: (x, y) => this._tap(x, y) });
@@ -127,8 +140,8 @@ export class Game {
     await this._warmTerrain((f) => progress(0.7 + f * 0.28, '海底地形 生成'));
     progress(1, '準備完了');
     this.state = 'title';
-    this._clock.start();
-    this._clock.getDelta();
+    this._clock.connect?.(document); // Page Visibility aware
+    this._clock.update();
     this._loop = this._loop.bind(this);
     if (this.manual) this._manualLoop(); else requestAnimationFrame(this._loop);
     window.__game = this;
@@ -195,7 +208,7 @@ export class Game {
       if (this.timeScale > 1) { this.setTimeScale(1); hud.msg('異常発生 — 時間加速を解除', 'warn'); }
       if (f.shake) this.shake = Math.max(this.shake, f.shake);
       if (f.sfx === 'bang' || f.sfx === 'crack') this.flash = Math.max(this.flash, 0.15);
-      if (f.kind === 'elec' || f.kind === 'fire') this.cockpit && (this._spark = this.cockpit.busBarPos);
+      if (f.kind === 'elec' || f.kind === 'fire') this.cockpit && (this._spark = this.cockpit.sparkPos(f.kind === 'fire' ? sys.fire.loc : f.target));
       if (f.kind === 'leak') navigator.vibrate?.([30, 40, 30]);
       if (f.sev >= 2) setTimeout(() => this.radio(this._radioReply(f)), 5000 + Math.random() * 4000);
     };
@@ -203,7 +216,8 @@ export class Game {
     inc.onImpact = (e) => { audio.play('thud', e); this.shake = Math.max(this.shake, Math.min(1.2, e * 0.9)); navigator.vibrate?.(Math.min(200, 40 + e * 80)); if (e > 1) this.flash = Math.max(this.flash, 0.06); };
     inc.onRepairStart = () => audio.play('tool');
     inc.onDrop = () => { audio.play('drop'); this._burst(40, -1.7); this.shake = Math.max(this.shake, 0.3); };
-    inc.onRepairDone = () => audio.play('good');
+    inc.onRepairDone = (f, pid, ok) => audio.play(ok === false ? 'warn' : 'good'); // failures used to chime 'good'
+    inc.onSfx = (name) => audio.play(name); // extinguisher discharge (the sound was defined but never played)
     this.life.onSighting = (name) => {
       const s = SPECIES[name];
       if (!s || this.state !== 'play') return;
@@ -243,7 +257,7 @@ export class Game {
   // ------------------------------------------------------------------ player actions
   setTimeScale(k) {
     if (k > 1 && !this.ap.engaged) { this.hud.msg('時間加速は自動操縦中のみ使用可能', 'warn'); return; }
-    if (k > 1 && this.inc.active.some((f) => !f.resolved && f.sev >= 2)) { this.hud.msg('異常対処中は時間加速できない', 'warn'); return; }
+    if (k > 1 && this.inc.announced.some((f) => f.sev >= 2)) { this.hud.msg('異常対処中は時間加速できない', 'warn'); return; }
     this.timeScale = k;
   }
   toggleLights() {
@@ -273,12 +287,13 @@ export class Game {
     if (n) { this.audio.play('drop'); this._burst(80, -1.7); }
     // un-isolate only a healthy VBT: re-opening a stuck-open flood valve floods it again mid-ascent
     if (this.sub.vbtValveOK && !this.sub._vbtStuckOpen) this.sub.vbtIsolated = false;
-    this.ap.engage(true); this.ap.setMode('ascent', true);
     this.ap.ballastAuto = true;
     this._homeBound = false;
+    // quiet engage: the no-NAV case is reported once below (it used to warn twice)
+    if (this.ap.engage(true, true)) this.ap.setMode('ascent', true);
     // without the NAV computer the AP cannot run the ascent: pump the VBT dry by hand
-    if (!this.ap.engaged) this.sub.vbtCmd = this.sys.powered('HYD') ? -1 : 0;
-    this.sys.msg(`緊急浮上！ ウェイト ${n} 個投棄、VBT全排水`, 'alarm');
+    else this.sub.vbtCmd = this.sys.powered('HYD') ? -1 : 0;
+    this.sys.msg(`緊急浮上！ ${n ? `ウェイト ${n} 個投棄` : '投棄できるウェイトなし'}、VBT全排水${this.ap.engaged ? '' : ' (航法電源なし — 自動操縦不可)'}`, 'alarm');
     this.radio('緊急浮上を確認した。浮上地点に向かう。');
   }
   toggleArm() {
@@ -341,16 +356,21 @@ export class Game {
       case 'AP': ap.engage(!ap.engaged); sys.msg(ap.engaged ? '自動操縦 接続' : '自動操縦 解除'); break;
       case 'HDG': ap.setMode('hdg', !ap.hdg.on, Math.round(heading(this.sub.yaw))); break;
       case 'DPT': ap.setMode('depth', !ap.depth.on, Math.round(this.sub.depth)); break;
-      case 'ALT': ap.setMode('alt', !ap.alt.on, 8); break;
-      case 'SPD': ap.setMode('speed', !ap.speed.on, 0.8); break;
+      // same setpoint rules as the tablet: current altitude, and keep the pilot's SPD setting
+      case 'ALT': ap.setMode('alt', !ap.alt.on, Math.max(3, Math.round(ap.m?.dvl ? ap.m.alt : 10))); break;
+      case 'SPD': ap.setMode('speed', !ap.speed.on); break;
       case 'STN': ap.setMode('station', !ap.station.on); break;
       case 'NAV': this.hud.open('nav'); break;
       case 'OAS': ap.oas.on = !ap.oas.on; sys.msg(`障害物回避 ${ap.oas.on ? 'ON' : 'OFF'}`); break;
-      case 'LT1': sys.lights.main = sys.lights.main > 0 ? 0 : 0.85; break;
-      case 'LT2': sys.lights.flood = sys.lights.flood > 0 ? 0 : 0.6; break;
+      case 'LT1': case 'LT2': {
+        // same interlock as the HUD light button
+        if (!sys.powered('LIGHT')) { this.hud.msg('外部照明ブレーカーが開放/トリップしている', 'warn'); break; }
+        const k = a.id === 'LT1' ? 'main' : 'flood';
+        sys.lights[k] = sys.lights[k] > 0 ? 0 : k === 'main' ? 0.85 : 0.6; break;
+      }
       case 'VBT': case 'TRM': this.hud.open('sys'); break;
       case 'ALM': audio.klaxonMuted = true; sys.msg('アラーム消音'); break;
-      case 'CAM': this.lasers = !this.lasers; break;
+      case 'CAM': this.lasers = !this.lasers; sys.msg(`レーザースケール ${this.lasers ? 'ON' : 'OFF'}${this.lasers && !sys.powered('CAM') ? ' (カメラ電源なし)' : ''}`); break;
     }
   }
 
@@ -377,7 +397,7 @@ export class Game {
     this.state = 'play';
     this.life.recording = true;
     this._devStart = false;
-    this._clock.getDelta(); this._acc = 0; // no catch-up burst after the title screen
+    this._clock.update(); this._acc = 0; // no catch-up burst after the title screen
     this.ui.classList.add('play');
   }
   static isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
@@ -416,10 +436,14 @@ export class Game {
       if (typeof d.ap.oas === 'boolean') ap.oas.on = d.ap.oas;
       if (typeof d.ap.ballastAuto === 'boolean') ap.ballastAuto = d.ap.ballastAuto;
       ap.engaged = !!d.ap.engaged && this.sys.powered('NAV'); // saved but never restored before
-      if (d.home) this.returnHome(true);
-      else if (d.ap.nav) { const p = POIS.find((x) => x.id === d.ap.nav); if (p) this.navTo(p); }
+      // resume a nav leg only if the AP was actually engaged, and silently (navTo() re-engaged a disengaged
+      // AP and re-announced '自動航行開始' on every continue)
+      if (ap.engaged && d.home) this.returnHome(true);
+      else if (ap.engaged && d.ap.nav) { const p = POIS.find((x) => x.id === d.ap.nav); if (p) ap.navTo(p); }
     }
     if (d.arm && !this.sub.manipulatorLost) { this.ext.setArm(true); this.ext.armPose = 1; }
+    // items already gone before the save are removed silently (continue replayed their falling animation)
+    this.ext.syncLost(this.sub);
     for (const m of [100, 200, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 10900]) if (this.sub.maxDepth > m) this._milestones.add(m);
     d.disc?.forEach((x) => this.discovered.add(x)); d.sampled?.forEach((x) => this.sampled.add(x)); this.samples = d.samples || 0;
     d.sight?.forEach((x) => this.life.sightings.add(x));
@@ -471,8 +495,9 @@ export class Game {
 
   // ------------------------------------------------------------------ main loop
   _manualLoop() { const step = () => { this._frame(1 / 20); setTimeout(step, 50); }; step(); }
-  _loop() {
+  _loop(ts) {
     requestAnimationFrame(this._loop);
+    this._clock.update(ts);
     const dt = Math.min(0.1, this._clock.getDelta());
     if (this._ctxLost || document.hidden) return;
     try { this._frame(dt); } catch (e) {
@@ -591,7 +616,8 @@ export class Game {
     const { sub, sys, ap, inc } = this;
     const cam = this.camera;
     const L = this.controls.look;
-    if (L.id === null) { L.yaw *= 1 - Math.min(1, dt * 0.25); L.pitch *= 1 - Math.min(1, dt * 0.25); }
+    // the look offset stays where the pilot left it (it drifted back 25 %/s, so a tap after looking at the
+    // overhead panel missed); '◎ 視点' recentres explicitly
     const yawL = L.yaw + +(this.params.get('lx') ?? 0), pitchL = EYE_PITCH + L.pitch + +(this.params.get('ly') ?? 0);
     const eye = _v.copy(SPHERE_CENTER).add(EYE);
     // neck/torso kinematics driven by the look offset (not the resting gaze): turning the head
@@ -635,10 +661,10 @@ export class Game {
     this.snow.update(t, cam.position, sp, a, sub.depth, this.pipe.params.silt);
     this.bubbles.update(dt, a, extLight * 0.5);
 
-    const unresolved = inc.active.filter((f) => !f.resolved);
+    const unresolved = inc.announced; // silent faults do not light the annunciators
     const alarmLevel = unresolved.some((f) => f.sev >= 3) || sub.floodL > 60 || sys.fire.active ? 2 : unresolved.length ? 1 : 0;
     this.alarmLevel = alarmLevel;
-    const cst = { sub, sys, ap, inc, ambient: a, extLight, pilot: this.pilot || { surge: 0, yaw: 0, heave: 0 }, alarmLevel, sparkBurst: this._spark || null, trail: this.trail };
+    const cst = { sub, sys, ap, inc, ambient: a, extLight, pilot: this.pilot || { surge: 0, yaw: 0, heave: 0 }, alarmLevel, lasers: this.lasers, sparkBurst: this._spark || null, trail: this.trail };
     this._spark = null;
     this.cockpit.update(dt, t, cst);
     this.mfd.update(dt, cst);

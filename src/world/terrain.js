@@ -95,8 +95,6 @@ export class Terrain {
     this.focus = new THREE.Vector3();
     this.meshCount = 0;
     this.triCount = 0;
-    this.maxMeshes = 900;
-    this.allMeshed = new Set();
   }
 
   _request(node) {
@@ -126,7 +124,6 @@ export class Terrain {
     m.userData.node = node;
     node.mesh = m;
     this.group.add(m);
-    this.allMeshed.add(node);
     this.meshCount++;
     this.triCount += data.I.length / 3;
   }
@@ -139,7 +136,6 @@ export class Terrain {
       node.mesh.geometry.dispose();
       node.mesh = null;
       this.meshCount--;
-      this.allMeshed.delete(node);
       if (node.cls === 0) node.state = 0;
     }
     if (node.children) { for (const c of node.children) this._dispose(c); node.children = null; }

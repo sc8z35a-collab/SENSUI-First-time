@@ -11,3 +11,5 @@ tools/agents/out/
 /*.jpg
 /*.png
 /shots/
+__pycache__/
+*.pyc

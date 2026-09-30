@@ -56,7 +56,7 @@ class Stick {
 }
 
 export class Controls {
-  constructor(root, { onTap, onLook } = {}) {
+  constructor(root, { onTap } = {}) {
     this.root = root;
     this.layer = document.createElement('div');
     this.layer.id = 'touch';
@@ -80,7 +80,7 @@ export class Controls {
       b.addEventListener('pointerup', rel); b.addEventListener('pointercancel', rel); b.addEventListener('lostpointercapture', rel);
     }
     this.look = { yaw: 0, pitch: 0, vy: 0, vp: 0, id: null, lx: 0, ly: 0, t0: 0, moved: 0, sx: 0, sy: 0 };
-    this.onTap = onTap; this.onLook = onLook;
+    this.onTap = onTap;
     this.precision = false; // fine-control mode halves all demands
     this.lookSens = (() => { try { const v = +localStorage.getItem('ad-look'); return v > 0 && v < 0.05 ? v : 0.0042; } catch { return 0.0042; } })();
     this.enabled = true;
@@ -142,7 +142,6 @@ export class Controls {
       L.moved += Math.abs(dx) + Math.abs(dy);
       L.yaw = clamp(L.yaw - dx * this.lookSens, -2.0, 2.0);
       L.pitch = clamp(L.pitch - dy * this.lookSens, -1.1, 1.2);
-      this.onLook?.();
     }
   }
   _up(e, cancel = false) {

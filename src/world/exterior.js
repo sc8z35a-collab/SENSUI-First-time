@@ -194,7 +194,7 @@ export class Exterior {
     const wGeo = new RoundedBoxGeometry(0.34, 0.2, 0.5, 3, 0.03);
     const wMat = W(new THREE.MeshStandardMaterial({ color: 0x4a4540, roughness: 0.6, metalness: 0.8 }));
     [[-0.45, -1.62, -2.2, 'descent'], [0.45, -1.62, -2.2, 'descent'], [-0.45, -1.62, -1.4, 'ascent'], [0.45, -1.62, -1.4, 'ascent']].forEach(([x, y, z, k]) => {
-      const m = new THREE.Mesh(wGeo, wMat); m.position.set(x, y, z); m.userData.kind = k; R.add(m); this.weightMeshes.push(m);
+      const m = new THREE.Mesh(wGeo, wMat); m.position.set(x, y, z); m.userData.kind = k; m.userData.sharedGeo = true; R.add(m); this.weightMeshes.push(m);
     });
     this.dropping = [];
 
@@ -220,6 +220,23 @@ export class Exterior {
     }
   }
 
+  // on load: remove weights / arm that were already gone at save time without the falling animation
+  syncLost(sub) {
+    let d = sub.weights.descent, a = sub.weights.ascent;
+    for (const m of this.weightMeshes) {
+      if (m.userData.gone) continue;
+      const keep = m.userData.kind === 'descent' ? d-- > 0 : a-- > 0;
+      if (!keep) { m.userData.gone = true; this.root.remove(m); }
+    }
+    if (sub.manipulatorLost && this.arm && this.arm.root.parent) { this.arm.root.parent.remove(this.arm.root); this._disposeTree(this.arm.root); }
+  }
+  // free GPU geometry of a detached object (materials are shared with the rest of the hull, keep them)
+  _disposeTree(o) {
+    o.traverse((c) => { if (c.geometry && !c.userData.sharedGeo) c.geometry.dispose(); });
+    // the weights share one geometry: free it once none is attached/falling any more
+    if (o.userData.sharedGeo && this.weightMeshes.every((m) => m.userData.gone && !m.parent)) o.geometry.dispose();
+  }
+
   setArm(deployed) { this.armTarget = deployed ? 1 : 0; }
 
   update(dt, t, st) {
@@ -230,7 +247,10 @@ export class Exterior {
     // lights: power, level, implosion faults, brownout flicker
     const powered = sys.powered('LIGHT');
     const dead = sys.lights.extFault;
-    const brown = sys.bat.A.online ? Math.min(1, 0.5 + sys.bat.A.soc * 4) : 0.6;
+    // brown-out follows whatever string actually feeds bus A (B via cross-tie counts; it was A-only, so
+    // lights sat at 60 % while a full B carried the bus)
+    const soc = sys.busSoc ? sys.busSoc('A') : sys.bat.A.soc;
+    const brown = Math.min(1, 0.5 + soc * 4);
     let extLight = 0;
     for (const l of this.lamps) {
       const lvl = l.kind === 'main' ? sys.lights.main : sys.lights.flood;
@@ -259,7 +279,8 @@ export class Exterior {
     if (this.sonarHead && sys.powered('SONAR') && sys.sensors.sonar) this.sonarHead.rotation.z = Math.sin(t * 1.6) * 0.3;
     // manipulator arm: critically damped interpolation between poses
     if (this.arm) {
-      if (sub.manipulatorLost && this.arm.root.parent === this.root) {
+      if (sub.manipulatorLost && this.arm.root.parent === this.root && !this.arm.lostHandled) {
+        this.arm.lostHandled = true;
         const wp = new THREE.Vector3(); this.arm.root.getWorldPosition(wp);
         this.root.remove(this.arm.root); this.scene.add(this.arm.root); this.arm.root.position.copy(wp); this.arm.root.quaternion.copy(sub.quat);
         this.dropping.push({ m: this.arm.root, v: new THREE.Vector3(0, -0.2, 0), w: new THREE.Vector3(0.2, 0.1, 0.3), t: 0 });
@@ -279,7 +300,7 @@ export class Exterior {
       d.v.y = Math.max(-2.2, d.v.y - dt * 1.5);
       d.m.position.addScaledVector(d.v, dt);
       d.m.rotation.x += d.w.x * dt; d.m.rotation.y += d.w.y * dt; d.m.rotation.z += d.w.z * dt;
-      if (d.t > 40 || !Number.isFinite(d.m.position.y)) { this.scene.remove(d.m); this.dropping.splice(i, 1); }
+      if (d.t > 40 || !Number.isFinite(d.m.position.y)) { this.scene.remove(d.m); this._disposeTree(d.m); this.dropping.splice(i, 1); }
     }
     return extLight;
   }

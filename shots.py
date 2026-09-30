@@ -4,11 +4,6 @@
 import sys, asyncio, os, base64
 os.environ.setdefault('PLAYWRIGHT_BROWSERS_PATH', '/home/user/webapp/.cache/pw')
 from playwright.async_api import async_playwright
-INIT = """
-(() => { window.__nan = [];
-  const hook = () => { const T = window.__THREE; if (!T) return setTimeout(hook, 5); };
-})();
-"""
 async def main():
     os.makedirs('shots', exist_ok=True)
     url, wait, w, h = sys.argv[1], float(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])

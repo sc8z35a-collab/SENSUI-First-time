@@ -5,12 +5,21 @@ import * as THREE from 'three';
 const loader = new THREE.TextureLoader();
 const cache = new Map();
 let maxAniso = 8;
-// also applied to already-loaded textures (a quality change used to affect only new ones)
+// every texture that follows the quality preset: cached originals *and* their clones / canvas textures
+// (clones and CanvasTextures never saw a quality change before). Weak so disposed textures can go.
+const managed = new Set();
+const refs = typeof WeakRef !== 'undefined';
+export function trackTexture(t) { if (t?.isTexture) { t.anisotropy = maxAniso; managed.add(refs ? new WeakRef(t) : t); } return t; }
 export function setMaxAnisotropy(a) {
   if (a === maxAniso) return;
   maxAniso = a;
-  for (const t of cache.values()) if (t.isTexture && t.anisotropy !== a) { t.anisotropy = a; if (t.image) t.needsUpdate = true; }
+  for (const r of managed) {
+    const t = refs ? r.deref() : r;
+    if (!t) { managed.delete(r); continue; }
+    if (t.anisotropy !== a) { t.anisotropy = a; if (t.image) t.needsUpdate = true; }
+  }
 }
+export const currentAnisotropy = () => maxAniso;
 
 function loadImage(url) {
   return new Promise((res, rej) => {
@@ -26,9 +35,9 @@ export function tex(name, { srgb = false, repeat = 1 } = {}) {
   if (cache.has(key)) return cache.get(key);
   const t = loader.load(`./tex/${name}.jpg`);
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.anisotropy = maxAniso;
   t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
   if (repeat !== 1) t.repeat.set(repeat, repeat);
+  trackTexture(t);
   cache.set(key, t);
   return t;
 }
@@ -61,7 +70,7 @@ export async function packORM(prefix, { ao = true, metal = false, defaultAO = 25
   ctx.putImageData(out, 0, 0);
   const t = new THREE.CanvasTexture(cv);
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.anisotropy = maxAniso;
+  trackTexture(t);
   t.colorSpace = THREE.NoColorSpace;
   t.generateMipmaps = true;
   t.minFilter = THREE.LinearMipmapLinearFilter;
@@ -87,7 +96,7 @@ export async function pbrMaterial(prefix, opts = {}) {
     mat.map = map.clone(); mat.normalMap = nrm.clone(); mat.roughnessMap = orm.clone();
     if (metal) mat.metalnessMap = mat.roughnessMap;
     if (ao) mat.aoMap = mat.roughnessMap;
-    [mat.map, mat.normalMap, mat.roughnessMap].forEach((t) => { rep(t); t.needsUpdate = true; });
+    [mat.map, mat.normalMap, mat.roughnessMap].forEach((t) => { rep(t); trackTexture(t); t.needsUpdate = true; });
   }
   return mat;
 }
@@ -115,11 +124,11 @@ export async function paintedMaterial({ color = 0xe9e7e1, repeat = 4, rough = [0
     }
     ctx.putImageData(d, 0, 0);
     rgh = new THREE.CanvasTexture(cv);
-    rgh.wrapS = rgh.wrapT = THREE.RepeatWrapping; rgh.colorSpace = THREE.NoColorSpace; rgh.anisotropy = maxAniso;
+    rgh.wrapS = rgh.wrapT = THREE.RepeatWrapping; rgh.colorSpace = THREE.NoColorSpace; trackTexture(rgh);
     cache.set(key, rgh);
   }
-  const r = rgh.clone(); r.repeat.set(repeat, repeat); r.needsUpdate = true;
-  const nrm = tex('whitepaint_normal').clone(); nrm.repeat.set(repeat, repeat); nrm.needsUpdate = true;
+  const r = trackTexture(rgh.clone()); r.repeat.set(repeat, repeat); r.needsUpdate = true;
+  const nrm = trackTexture(tex('whitepaint_normal').clone()); nrm.repeat.set(repeat, repeat); nrm.needsUpdate = true;
   const mat = new THREE.MeshStandardMaterial({ color, roughness: 1, metalness, normalMap: nrm, roughnessMap: r });
   mat.normalScale.set(normalScale, normalScale);
   return mat;

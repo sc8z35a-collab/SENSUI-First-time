@@ -19,7 +19,10 @@ export const SPEC = {
   name: 'DSV-11 わだつみ',
   length: 8.4, beam: 3.0, height: 3.6,
   dryMass: 11800,             // kg incl. pilot & payload
-  V0: 11.681 + 0.315,          // m^3 displaced at surface (tuned: neutral with VBT 150 L + weights)
+  // m^3 displaced at surface. Tuned so the boat (all 4 weights aboard) is neutral with ~150 L in the VBT at
+  // shallow depth: with the tank empty it has ~150 kg reserve buoyancy and floats until the pilot floods
+  // (it used to be neutral at VBT 0 L and sank before any input)
+  V0: 11.681 + 0.315 + 0.1505,
   hullCompress: 3.84e-6,      // fractional volume loss per metre depth
   thermalExp: 6e-5,           // fractional volume change per °C (foam)
   vbtCap: 400,                // L
@@ -110,18 +113,20 @@ export class Submarine {
     return SPEC.V0 * (1 - SPEC.hullCompress * depth) * (1 + SPEC.thermalExp * (temp - 20));
   }
   // net buoyancy (N, + = up)
-  netBuoyancy(depth = this.depth) {
+  netBuoyancy(depth = this.depth, surfaceModel = true) {
     const rho = seawaterDensity(depth);
     const V = this.displacedVolume(depth, temperatureAt(depth));
-    if (this.pos.y > -1.6) {
+    if (surfaceModel && this.pos.y > -1.6) {
       // partially surfaced: buoyancy falls as hull rises out of the water
       const sub = THREE.MathUtils.clamp((-this.pos.y + 1.8) / 3.4, 0.15, 1);
       return rho * V * sub * G - this.totalMass * G;
     }
     return rho * V * G - this.totalMass * G;
   }
-  // how many kg the boat is heavy (+) or light (-)
-  get trimState() { return -this.netBuoyancy() / G; }
+  // how many kg the boat is heavy (+) or light (-) as ballasted, i.e. fully submerged. The partial-surfacing
+  // term is a waterline (dynamics) effect, not a ballast state: including it made the gauges read hundreds
+  // of kg heavy/light (-273 kg at the start) while simply bobbing at the surface.
+  get trimState() { return -this.netBuoyancy(this.depth, false) / G; }
 
   dropWeight(kind) {
     if (this.weights[kind] > 0) { this.weights[kind]--; return true; }
@@ -258,8 +263,10 @@ export class Submarine {
     const [t1, t2, t3, t4, t5, t6] = this.thr;
     t1.cmd = c(u.surge + u.yaw * 0.55);
     t2.cmd = c(u.surge - u.yaw * 0.55);
-    t3.cmd = c(u.heave - u.pitch * 0.6);
-    t4.cmd = c(u.heave + u.pitch * 0.6);
+    // + pitch demand = bow-up torque: forward vertical pushes up, aft pushes down (the signs were swapped,
+    // so the always-on SAS drove the bow further away from level)
+    t3.cmd = c(u.heave + u.pitch * 0.6);
+    t4.cmd = c(u.heave - u.pitch * 0.6);
     t5.cmd = c(u.sway + u.yaw * 0.6);
     t6.cmd = c(u.sway - u.yaw * 0.6);
     // yaw: T1 forward & T2 back rotates bow to starboard? (+yaw input = turn right)
@@ -317,7 +324,8 @@ export class Submarine {
       pos: this.pos.toArray(), vel: this.vel.toArray(), yaw: this.yaw, pitch: this.pitch, roll: this.roll,
       vbt: this.vbt, trim: this.trim, weights: { ...this.weights }, floodL: this.floodL, time: this.time, maxDepth: this.maxDepth, distance: this.distance,
       manipulatorLost: !!this.manipulatorLost, vbtIsolated: this.vbtIsolated, thrustLimit: this.thrustLimit, vbtValveOK: this.vbtValveOK, vbtPumpOK: this.vbtPumpOK, trimPumpOK: this.trimPumpOK, _vbtStuckOpen: !!this._vbtStuckOpen,
-      thr: this.thr.map((t) => ({ health: t.health, fault: t.fault, enabled: t.enabled, jam: t.jam, temp: t.temp })),
+      // pre: the fault hidden behind a thermal trip (a worn bearing was cured by save/load)
+      thr: this.thr.map((t) => ({ health: t.health, fault: t.fault, enabled: t.enabled, jam: t.jam, temp: t.temp, pre: t._preThermal || null })),
       tether: this.tether ? { anchor: this.tether.anchor.toArray(), len: this.tether.len, strength: this.tether.strength } : null,
       currentExtra: this.currentExtra,
     };
@@ -330,7 +338,7 @@ export class Submarine {
     this.vbtValveOK = s.vbtValveOK !== false; this.vbtPumpOK = s.vbtPumpOK !== false; this.trimPumpOK = s.trimPumpOK !== false; this._vbtStuckOpen = !!s._vbtStuckOpen;
     if (!Number.isFinite(this.pos.x + this.pos.y + this.pos.z)) this.pos.set(12, -1.5, 150);
     // explicit fields only (Object.assign could overwrite id/pos/axis tables from a tampered save)
-    s.thr?.forEach((t, i) => { if (this.thr[i] && t) { const T = this.thr[i]; T.fault = t.fault ?? null; T.enabled = t.enabled !== false; T.jam = num(t.jam); T.temp = num(t.temp, 12); T.health = num(t.health, 1); } });
+    s.thr?.forEach((t, i) => { if (this.thr[i] && t) { const T = this.thr[i]; T.fault = t.fault ?? null; T.enabled = t.enabled !== false; T.jam = num(t.jam); T.temp = num(t.temp, 12); T.health = num(t.health, 1); T._preThermal = T.fault === 'thermal' && typeof t.pre === 'string' ? t.pre : null; } });
     this.vbt = THREE.MathUtils.clamp(this.vbt, 0, SPEC.vbtCap); this.trim = THREE.MathUtils.clamp(this.trim, -1, 1);
     // entanglement survives a reload (jammed thrusters without a tether could never be freed)
     if (s.tether && Array.isArray(s.tether.anchor)) this.tether = { anchor: new THREE.Vector3().fromArray(s.tether.anchor), len: num(s.tether.len, 8), strength: num(s.tether.strength, 0.5) };

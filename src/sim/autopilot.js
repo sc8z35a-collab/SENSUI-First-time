@@ -28,7 +28,8 @@ export class Autopilot {
   constructor(sub, sys) {
     this.sub = sub; this.sys = sys;
     this.engaged = false;
-    this.hdg = { on: false, target: 0 };
+    // HDG target starts at (and, until set, follows) the current heading: it read 000 while pointing 090
+    this.hdg = { on: false, target: Math.round(heading(sub.yaw)), preset: false };
     this.depth = { on: false, target: 50 };
     this.alt = { on: false, target: 8 };
     this.speed = { on: false, target: 1.0 };
@@ -48,23 +49,33 @@ export class Autopilot {
     this._scan = 0;
   }
 
-  // pilot took the VBT valve: the AP stops commanding it (it used to zero a pilot's hold on disengage)
-  releaseBallast() { this._apVbt = false; }
-  engage(on = !this.engaged) {
-    if (on && !this.sys.powered('NAV')) { this.sys.msg('航法コンピュータに電源がない — 自動操縦不可', 'warn'); this.engaged = false; return; }
-    this.engaged = on;
-    if (!on) { this._navVert = false; if (this._apVbt) this.sub.vbtCmd = 0; this._apVbt = false; }
-    if (on) {
+  // returns true when the AP is (now) engaged. `quiet` suppresses the no-power warning for callers that
+  // report it themselves (emergency blow showed it twice)
+  engage(on = !this.engaged, quiet = false) {
+    if (on && !this.sys.powered('NAV')) { if (!quiet) this.sys.msg('航法コンピュータに電源がない — 自動操縦不可', 'warn'); this.engaged = false; return false; }
+    if (!on) { this._disengage(); return false; }
+    this.engaged = true;
+    {
       const s = this.sub;
       if (!this.hdg.on && !this.nav.on && !this.station.on) { this.hdg.on = true; this.hdg.target = heading(s.yaw); }
       if (!this.depth.on && !this.alt.on && !this.descent.on && !this.ascent.on) { this.depth.on = true; this.depth.target = Math.round(s.depth); }
       Object.values(this.pid).forEach((p) => p.reset());
     }
+    return true;
+  }
+  // single disengage path (pilot switch and NAV power loss): release the AP-driven VBT valve and drop the
+  // nav leg, so a later re-engage does not silently resume the old destination
+  _disengage() {
+    this.engaged = false;
+    this.nav.on = false; this._navVert = false;
+    if (this._apVbt) this.sub.vbtCmd = 0;
+    this._apVbt = false;
   }
   setMode(axis, on, val) {
     const m = this[axis]; if (!m) return;
     m.on = on;
     if (val !== undefined) { if ('target' in m) m.target = val; else if ('rate' in m) m.rate = val; }
+    if (axis === 'hdg') m.preset = false;
     // exclusivity for vertical modes
     if (on && ['depth', 'alt', 'descent', 'ascent'].includes(axis)) for (const k of ['depth', 'alt', 'descent', 'ascent']) if (k !== axis) this[k].on = false;
     if (on && ['hdg', 'nav', 'station'].includes(axis)) for (const k of ['hdg', 'nav', 'station']) if (k !== axis) this[k].on = false;
@@ -176,7 +187,10 @@ export class Autopilot {
     this.warn = '';
     if (!this.ballastAuto) this._apVbt = false;
     const navPower = sys.powered('NAV');
-    if (!navPower && this.engaged) { this.engaged = false; this.nav.on = false; this._navVert = false; sys.msg('航法コンピュータ電源喪失 — 自動操縦 解除', 'alarm'); }
+    // through the common disengage path: the AP-driven VBT command stayed latched here (kept flooding)
+    if (!navPower && this.engaged) { this._disengage(); sys.msg('航法コンピュータ電源喪失 — 自動操縦 解除', 'alarm'); }
+    // an unused HDG setpoint follows the boat so the tablet shows something meaningful
+    if (!(this.engaged && (this.hdg.on || this.station.on)) && !this.hdg.preset) this.hdg.target = Math.round(heading(s.yaw)) % 360;
     if (!this.engaged) {
       this.status = 'STBY';
       // pitch stabiliser (always-on SAS) via vertical thrusters
