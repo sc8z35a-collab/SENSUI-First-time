@@ -50,7 +50,7 @@ export class Systems {
     this.o2Flow = 0.4;                // L/min set (consumption ~0.35 L/min resting)
     this.o2RegOK = true;
     this.scrubber = { fan: true, canister: 1, spare: 2, fanOK: true };
-    this.emergencyO2 = 0;             // hours of emergency rebreather
+    this.emergencyO2 = 1.5;           // hours of emergency rebreather (full from the start: the tablet read '0 min')
     this.emergencyMask = false;
     this.pilotStress = 0; this.pilotHealth = 1; this.hypoxia = 0; this.hypercapnia = 0; this.hypothermia = 0;
     // --- hull
@@ -60,9 +60,8 @@ export class Systems {
     this.sensors = { depth: true, dvl: true, sonar: true, gyro: true, comms: true, cams: true, depthDrift: 0, gyroDrift: 0 };
     this.comms = { signal: 1, lastContact: 0 };
     this.messages = [];
-    this.alarmsAck = new Set();
     this.dead = null;
-    this.flash = 0;
+    this.flash = 0;                   // >0: MFD brown-out flicker (low bus voltage / trips / string loss)
   }
 
   get busOK() {
@@ -76,6 +75,15 @@ export class Systems {
     // E bus is fed by DC-DC from bus B only (as modelled in step()), else by the emergency battery
     if (b.bus === 'E') return bus.E || bus.B;
     return bus[b.bus];
+  }
+  // a penetrator with its isolation valve shut blocks this breaker's feed
+  blocked(id) { return PENETRATORS.some((p) => this.pen[p.id].isolated && p.feeds.includes(id)); }
+  // state of charge of whatever string actually feeds main bus A/B (honours offline strings + cross-tie)
+  busSoc(bus) {
+    const own = bus === 'A' ? this.bat.A : this.bat.B, other = bus === 'A' ? this.bat.B : this.bat.A;
+    if (own.online) return own.soc;
+    if (this.cross && other.online) return other.soc;
+    return 0;
   }
   // leak flow through an orifice: Q = Cd*A*sqrt(2*dP/rho)
   static orifice(areaMM2, dP) {
@@ -104,7 +112,6 @@ export class Systems {
     L.COMMS = pw('COMMS') ? 90 : 0;
     L.HEAT = pw('HEAT') ? 1800 : 0;
     L.CAM = pw('CAM') ? 110 : 0;
-    if (!pw('HYD')) { sub.vbtPumpOK_power = false; } else sub.vbtPumpOK_power = true;
     let sumA = 0, sumB = 0, sumE = 0;
     for (const b of BREAKERS) {
       const w = L[b.id] || 0; this.breakers[b.id].load = w;
@@ -168,15 +175,16 @@ export class Systems {
     // ------------------------------------------------ fire
     const F = this.fire;
     if (F.active) {
-      F.intensity = Math.min(1, F.intensity + dt * 0.02 * (this.o2 / 21));
+      // an electrical fire is fed by its energised panel: once de-energised it only smoulders and dies out
+      // (growth 0.02*O2/21 used to outrun the 0.012 decay, so a de-energised fire kept growing)
+      const fb = F.loc && this.breakers[F.loc];
+      const live = !fb || pw(F.loc);
+      F.intensity = Math.min(1, F.intensity + dt * (live ? 0.02 * (this.o2 / 21) : -0.015));
       F.smoke = Math.min(1, F.smoke + F.intensity * dt * 0.02);
       this.o2 -= F.intensity * dt * 0.004;
       this.co2 += F.intensity * dt * 0.002;
       this.cabinT += F.intensity * dt * 0.08;
-      if (F.loc && this.breakers[F.loc]?.closed && Math.random() < dt * 0.05) this.breakers[F.loc].tripped = true;
-      // an electrical fire starves once its panel is de-energised
-      const fb = F.loc && this.breakers[F.loc];
-      if (fb && (!fb.closed || fb.tripped)) F.intensity -= dt * 0.012;
+      if (fb && fb.closed && !fb.tripped && Math.random() < dt * 0.05) { fb.tripped = true; this.flash = 0.5; }
       if (this.o2 < 13) F.intensity -= dt * 0.1;
       if (F.intensity <= 0) { F.active = false; F.intensity = 0; this.msg(this.o2 < 13 ? '火災は酸素欠乏により鎮火' : '火災鎮火', 'info'); }
     } else {
@@ -185,7 +193,6 @@ export class Systems {
     }
 
     // ------------------------------------------------ life support
-    const moles = (this.cabinVol * 1000) / 22.4; // ~250 mol of gas
     const breath = this.emergencyMask ? 0 : 1;
     const metab = (0.35 + this.pilotStress * 0.4) / 60; // L/s O2 consumed
     // manual bypass valve is mechanical: works without LSS power / with a broken regulator
@@ -216,10 +223,13 @@ export class Systems {
     this.hypercapnia = clamp(this.hypercapnia + dt * (inspCO2 > 2.0 ? (inspCO2 - 2) * 0.0025 : -0.01), 0, 1);
     this.hypothermia = clamp(this.hypothermia + dt * (this.cabinT < 12 ? (12 - this.cabinT) * 0.00015 : -0.002), 0, 1);
     const smokeTox = this.emergencyMask ? 0 : F.smoke;
-    this.pilotHealth = clamp(this.pilotHealth - dt * (this.hypoxia * 0.004 + this.hypercapnia * 0.003 + this.hypothermia * 0.002 + smokeTox * 0.003 + (this.cabinP > 3 ? (this.cabinP - 3) * 0.002 : 0)) + dt * 0.0002, 0, 1);
+    // per-cause damage rates: the dominant one names the death (smoke / cold / pressure all read 'CO2')
+    const harm = { hypoxia: this.hypoxia * 0.004, co2: this.hypercapnia * 0.003, hypothermia: this.hypothermia * 0.002, smoke: smokeTox * 0.003, pressure: this.cabinP > 3 ? (this.cabinP - 3) * 0.002 : 0 };
+    let dmg = 0; for (const k in harm) dmg += harm[k];
+    this.pilotHealth = clamp(this.pilotHealth - dt * dmg + dt * 0.0002, 0, 1);
     if (this.emergencyMask) { this.emergencyO2 = Math.max(0, this.emergencyO2 - dt / 3600); if (this.emergencyO2 <= 0) { this.emergencyMask = false; this.msg('緊急呼吸器の酸素が尽きた', 'warn'); } }
     this.pilotStress = clamp(this.pilotStress + dt * (this.activeCautions > 0 ? 0.01 : -0.004), 0, 1);
-    if (this.pilotHealth <= 0 && !this.dead) this.dead = this.hypoxia > this.hypercapnia ? 'hypoxia' : 'co2';
+    if (this.pilotHealth <= 0 && !this.dead) { let best = 'hypoxia', bv = -1; for (const k in harm) if (harm[k] > bv) { bv = harm[k]; best = k; } this.dead = best; }
     // total power loss = no string can feed anything (offline strings count, not only an exact 0 % SoC)
     const alive = (b) => b.online && b.soc > 0;
     if (!alive(this.bat.A) && !alive(this.bat.B) && !alive(this.bat.E) && !this.dead) this.dead = 'power';
@@ -235,7 +245,16 @@ export class Systems {
   }
 
   _drain(b, watts, dt, seaT) {
-    if (!b.online) { b.i = 0; return; }
+    const name = b === this.bat.A ? 'A' : b === this.bat.B ? 'B' : 'E';
+    const cool = (b.temp - 4 - seaT * 0.5) * 0.004;
+    if (!b.online) {
+      // an offline string still cools towards the sea (it stayed at its cut-off temperature forever);
+      // a thermal runaway keeps self-heating inside the pack and only clears once it has cooled right down
+      b.i = 0;
+      b.temp += ((b.fault === 'thermal' ? 0.25 : 0) - cool * 1.5) * dt;
+      if (b.fault === 'thermal' && b.temp < 35) { b.fault = null; this.msg(`バッテリー${name} 冷却完了 — 熱暴走が収まった`, 'info'); }
+      return;
+    }
     const kWh = watts * dt / 3.6e6;
     b.soc = Math.max(0, b.soc - kWh / b.cap);
     const nom = b.cap > 10 ? 302 : 28.4;
@@ -243,17 +262,40 @@ export class Systems {
     const ocv = nom * (0.86 + 0.18 * b.soc - 0.04 * Math.exp(-b.soc * 20));
     b.i = watts / Math.max(ocv, 1);
     b.v = ocv - b.i * R * (1 + Math.max(0, 10 - b.temp) * 0.04);
-    b.temp += (b.i * b.i * R * 0.00005 - (b.temp - 4 - seaT * 0.5) * 0.004 + (b.fault === 'thermal' ? 0.6 : 0)) * dt;
-    if (b.temp > 75 && b.fault !== 'thermal') { b.fault = 'thermal'; this.msg(`バッテリー${b === this.bat.A ? 'A' : b === this.bat.B ? 'B' : 'E'} 熱暴走の兆候`, 'alarm'); }
-    if (b.fault === 'thermal' && b.temp > 110 && b.online) { b.online = false; this.msg(`バッテリー${b === this.bat.A ? 'A' : b === this.bat.B ? 'B' : 'E'} 過熱保護で自動遮断`, 'alarm'); }
-    if (b.soc <= 0) { b.online = false; this.msg('バッテリー枯渇: 系統オフライン', 'alarm'); }
+    // cell imbalance: the weak cell heats and escalates into a thermal runaway in ~20 min unless the load is
+    // shed (slows it ~3x), the string isolated or the BMS balances it (the fault used to have no effect at all)
+    let cell = 0;
+    if (b.fault === 'cell') {
+      b.cellT = (b.cellT || 0) + dt * (this.sub.thrustLimit <= 0.5 ? 0.25 : 1);
+      cell = 0.04 + b.cellT * 0.00028 + b.i * 0.0008;
+    }
+    b.temp += (b.i * b.i * R * 0.00005 - cool + cell + (b.fault === 'thermal' ? 0.6 : 0)) * dt;
+    if (b.fault === 'cell' && b.temp > 45 && !b._cellWarn) { b._cellWarn = true; this.msg(`バッテリー${name} 温度上昇中 — セル不均衡`, 'warn'); }
+    if (b.temp > 75 && b.fault !== 'thermal') { b.fault = 'thermal'; b._cellWarn = false; b.cellT = 0; this.msg(`バッテリー${name} 熱暴走の兆候`, 'alarm'); }
+    if (b.fault === 'thermal' && b.temp > 110 && b.online) { b.online = false; this.flash = 1; this.msg(`バッテリー${name} 過熱保護で自動遮断`, 'alarm'); }
+    if (b.soc <= 0) { b.online = false; this.flash = 1; this.msg('バッテリー枯渇: 系統オフライン', 'alarm'); }
+    // sagging terminal voltage: MFDs brown out / flicker
+    if (b.cap > 10 && watts > 0 && b.v < 272 && Math.random() < dt * 2) this.flash = Math.max(this.flash, 0.15);
+  }
+  // pilot switch for a main string. Returns false (with a message) when an interlock refuses it.
+  setBattery(n, online) {
+    const b = this.bat[n];
+    if (!b) return false;
+    if (online) {
+      if (b.soc <= 0) { this.msg(`バッテリー${n} は枯渇している`, 'warn'); return false; }
+      // thermal interlock: a string that tripped on runaway stays out until it has cooled
+      if (b.fault === 'thermal') { this.msg(`バッテリー${n} 熱暴走インターロック — 冷却まで接続不可 (${Math.round(b.temp)}°C)`, 'warn'); return false; }
+    }
+    b.online = online;
+    this.msg(`バッテリー${n} ${online ? '接続' : '切離'}`, 'warn');
+    return true;
   }
   _wet(dt, k) {
     // insulation resistance falls, eventually ground faults trip breakers
     for (const n of ['A', 'B']) this.bat[n].iso = Math.max(0.05, this.bat[n].iso - dt * k * 0.3);
     if (Math.random() < dt * k * 0.05) {
       const cands = BREAKERS.filter((b) => this.breakers[b.id].closed && !this.breakers[b.id].tripped);
-      if (cands.length) { const b = cands[(Math.random() * cands.length) | 0]; this.breakers[b.id].tripped = true; this.msg(`地絡: ${b.name} ブレーカー トリップ`, 'warn'); }
+      if (cands.length) { const b = cands[(Math.random() * cands.length) | 0]; this.breakers[b.id].tripped = true; this.flash = 0.4; this.msg(`地絡: ${b.name} ブレーカー トリップ`, 'warn'); }
     }
   }
 
@@ -270,21 +312,29 @@ export class Systems {
   // ------------------------------------------------ crew actions
   toggleBreaker(id) {
     const b = this.breakers[id];
-    if (!b) return;
-    if (b.tripped) { b.tripped = false; b.closed = true; this.msg(`${b.name} ブレーカー リセット`); return; }
-    // a feed-through with its isolation valve shut cannot be re-energised
-    if (!b.closed && PENETRATORS.some((p) => this.pen[p.id].isolated && p.feeds.includes(id))) { this.msg(`${b.name}: 貫通部が隔離中 — 投入不可`, 'warn'); return; }
+    if (!b) return false;
+    // a feed-through with its isolation valve shut cannot be re-energised — not via trip -> reset either
+    if ((b.tripped || !b.closed) && this.blocked(id)) { this.msg(`${b.name}: 貫通部が隔離中 — 投入不可`, 'warn'); return false; }
+    if (b.tripped) { b.tripped = false; b.closed = true; this.msg(`${b.name} ブレーカー リセット`); return true; }
     b.closed = !b.closed;
     this.msg(`${b.name} ブレーカー ${b.closed ? '投入' : '開放'}`);
+    return true;
   }
   isolate(id) {
     const p = this.pen[id];
     if (!p || id === 'VP' || id === 'HATCH') return false;
     p.isolated = !p.isolated;
     for (const f of p.feeds) {
-      if (p.isolated) this.breakers[f].closed = false;
-      // re-open: restore the feeds unless another isolated penetrator still blocks them
-      else if (!PENETRATORS.some((q) => q.id !== id && this.pen[q.id].isolated && q.feeds.includes(f))) this.breakers[f].closed = true;
+      const b = this.breakers[f];
+      if (p.isolated) {
+        // remember the pre-isolation position once (a breaker behind two isolated penetrators keeps the first)
+        if (b.preIso === undefined) b.preIso = b.closed;
+        b.closed = false;
+      } else if (!this.blocked(f)) {
+        // re-open: restore what it was before (an OFF heater used to be switched on), then forget it
+        if (b.preIso !== undefined) b.closed = b.preIso;
+        delete b.preIso;
+      }
     }
     this.msg(`${p.name} ${p.isolated ? '遮断弁 閉' : '遮断弁 開'}`, p.isolated ? 'warn' : 'info');
     return true;
@@ -310,22 +360,20 @@ export class Systems {
     this.scrubber.spare--; this.scrubber.canister = 1; this.msg('CO2吸収キャニスター交換完了');
   }
   toggleMask() {
-    if (!this.emergencyMask && this.emergencyO2 <= 0 && !this._maskUsed) this.emergencyO2 = 1.5;
     if (!this.emergencyMask && this.emergencyO2 <= 0) { this.msg('緊急呼吸器は使い切った', 'warn'); return; }
-    this._maskUsed = true;
     this.emergencyMask = !this.emergencyMask;
     this.msg(this.emergencyMask ? '緊急呼吸器 装着' : '緊急呼吸器 外した');
   }
 
   serialize() {
     const o = {};
-    for (const k of ['o2', 'co2', 'cabinT', 'rh', 'o2Bottles', 'o2Flow', 'cross', 'emergencyO2', 'emergencyMask', '_maskUsed', '_bypass', 'pilotHealth', 'pilotStress', 'hypoxia', 'hypercapnia', 'hypothermia', 'o2RegOK']) o[k] = this[k];
+    for (const k of ['o2', 'co2', 'cabinT', 'rh', 'o2Bottles', 'o2Flow', 'cross', 'emergencyO2', 'emergencyMask', '_bypass', 'pilotHealth', 'pilotStress', 'hypoxia', 'hypercapnia', 'hypothermia', 'o2RegOK']) o[k] = this[k];
     o.messages = this.messages.slice(-40);
     o.bat = JSON.parse(JSON.stringify(this.bat));
     o.hull = { ...this.hull };
     o.scrubber = { ...this.scrubber };
     o.lights = { ...this.lights };
-    o.breakers = Object.fromEntries(Object.entries(this.breakers).map(([k, b]) => [k, { closed: b.closed, tripped: b.tripped }]));
+    o.breakers = Object.fromEntries(Object.entries(this.breakers).map(([k, b]) => [k, { closed: b.closed, tripped: b.tripped, preIso: b.preIso }]));
     o.pen = Object.fromEntries(Object.entries(this.pen).map(([k, p]) => [k, { leakArea: p.leakArea, isolated: p.isolated, clamped: p.clamped }]));
     o.fire = { ...this.fire };
     o.sensors = { ...this.sensors };
@@ -333,11 +381,18 @@ export class Systems {
   }
   restore(o) {
     for (const k of ['o2', 'co2', 'cabinT', 'rh', 'o2Bottles', 'o2Flow', 'emergencyO2', 'pilotHealth', 'pilotStress', 'hypoxia', 'hypercapnia', 'hypothermia']) if (Number.isFinite(o[k])) this[k] = o[k];
-    for (const k of ['cross', 'emergencyMask', '_maskUsed', '_bypass']) if (o[k] !== undefined) this[k] = !!o[k];
+    // saves from before the rebreather started full: 0 h but never worn means it is still full
+    if (o.emergencyO2 === 0 && o._maskUsed === false) this.emergencyO2 = 1.5;
+    for (const k of ['cross', 'emergencyMask', '_bypass']) if (o[k] !== undefined) this[k] = !!o[k];
     if (Array.isArray(o.messages)) this.messages = o.messages.filter((m) => m && typeof m.text === 'string').slice(-80);
     if (o.bat) for (const n of ['A', 'B', 'E']) if (o.bat[n]) Object.assign(this.bat[n], o.bat[n]);
     Object.assign(this.hull, o.hull || {}); Object.assign(this.scrubber, o.scrubber || {}); Object.assign(this.lights, o.lights || {});
-    for (const k in o.breakers || {}) if (this.breakers[k]) Object.assign(this.breakers[k], o.breakers[k]);
+    for (const k in o.breakers || {}) {
+      const b = this.breakers[k], s = o.breakers[k];
+      if (!b || !s) continue;
+      b.closed = s.closed !== false; b.tripped = !!s.tripped;
+      if (typeof s.preIso === 'boolean') b.preIso = s.preIso; else delete b.preIso;
+    }
     for (const k in o.pen || {}) if (this.pen[k]) Object.assign(this.pen[k], o.pen[k]);
     Object.assign(this.fire, o.fire || {}); Object.assign(this.sensors, o.sensors || {});
     if (o.o2RegOK !== undefined) this.o2RegOK = o.o2RegOK;

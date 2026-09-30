@@ -63,6 +63,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;touch-
   line-height:1.1;touch-action:manipulation;transition:background .12s,border-color .12s}
 .hb small{display:block;font-size:9px;font-weight:500;opacity:.72;letter-spacing:.04em;margin-top:1px;white-space:nowrap}
 .hb:active{transform:scale(.96)}
+.hb.warn{border-color:var(--warn);color:#ffe1a0}
 .hb.on{background:rgba(20,110,150,.6);border-color:#9fe6ff;color:#fff;box-shadow:0 0 12px rgba(80,200,255,.35)}
 .hb.blue.on,.hb.blue.run{background:rgba(20,80,200,.6);border-color:#7fb0ff}
 .hb.amber{border-color:rgba(255,176,0,.45)} .hb.amber.on,.hb.amber.run{background:rgba(170,100,0,.6);border-color:#ffcf6a}

@@ -145,7 +145,10 @@ export class AudioEngine {
     const { g, filt } = this._filterChain(s, dest, { hp, lp, bp, q });
     const t0 = ctx.currentTime + delay;
     this._env(g, a, gain, d, t0);
-    s.start(t0, Math.max(0, rnd() * Math.max(0, buf.duration - a - d - 0.1))); s.stop(t0 + a + d + 0.05);
+    const len = (a + d + 0.1) * rate;
+    // noise buffers are 3-5 s: longer shots (rumble 8.2 s, implode 7.5 s) loop instead of cutting off
+    if (len >= buf.duration) { s.loop = true; s.start(t0, rnd() * buf.duration); } else s.start(t0, rnd() * (buf.duration - len));
+    s.stop(t0 + a + d + 0.05);
     return { s, g, filt, t0 };
   }
   _tone(f, dest, { type = 'sine', gain = 0.3, a = 0.005, d = 0.4, delay = 0, slide = 0 } = {}) {
@@ -200,8 +203,9 @@ export class AudioEngine {
     const n = 2 + ((rnd() * 3) | 0);
     for (let i = 0; i < n; i++) {
       const f0 = 70 + rnd() * 160, dur = 0.8 + rnd() * 2.2 * k;
-      const { filt } = this._shot(this.pink, this.hull, { gain: 0.9 * k, a: 0.15 + rnd() * 0.3, d: dur, bp: f0, q: 18 + rnd() * 20, delay: i * 0.15 * rnd() });
-      filt.bp.frequency.setValueAtTime(f0, now); filt.bp.frequency.linearRampToValueAtTime(f0 * (0.6 + rnd() * 0.6), now + dur);
+      const { filt, t0 } = this._shot(this.pink, this.hull, { gain: 0.9 * k, a: 0.15 + rnd() * 0.3, d: dur, bp: f0, q: 18 + rnd() * 20, delay: i * 0.15 * rnd() });
+      // sweep from the shot's own start (it began at `now`, so delayed groans only heard its tail)
+      filt.bp.frequency.setValueAtTime(f0, t0); filt.bp.frequency.linearRampToValueAtTime(f0 * (0.6 + rnd() * 0.6), t0 + dur);
     }
     // sharp pops / ticks
     const pops = (rnd() * 4 * k) | 0;

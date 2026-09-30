@@ -9,7 +9,10 @@ import { zoneName, pressureAt, toBar, temperatureAt } from '../sim/env.js';
 import { SPECIES } from '../world/life.js';
 import { QUALITY } from '../core/quality.js';
 
-const fmt = (v, d = 0) => (Number.isFinite(v) ? v.toFixed(d) : '---');
+// no '-0.0' / '-0': a value that rounds to zero prints unsigned
+const fmt = (v, d = 0) => { if (!Number.isFinite(v)) return '---'; const s = v.toFixed(d); return /^-0(\.0+)?$/.test(s) ? s.slice(1) : s; };
+// signed buoyancy: '+' only when it really rounds to a positive number (it blinked '+0' / '-0')
+const sgn = (v, d = 0) => { const s = fmt(v, d); return v > 0 && s !== fmt(0, d) ? '+' + s : s; };
 const h = (tag, cls, html) => { const e = document.createElement(tag); if (cls) e.className = cls; if (html !== undefined) e.innerHTML = html; return e; };
 const sevCls = ['info', 'caut', 'warn', 'alarm'];
 
@@ -136,20 +139,21 @@ export class HUD {
     E.hAlt.textContent = m.dvl ? fmt(m.alt, 1) : '---';
     E.hAlt.className = 'v s' + (m.dvl && m.alt < 5 ? ' alarm' : m.dvl && m.alt < 12 ? ' warn' : '');
     const B = -sub.trimState;
-    E.hBuoy.textContent = (B > 0 ? '+' : '') + fmt(B);
+    E.hBuoy.textContent = sgn(B);
     E.hBuoy.className = 'v s' + (Math.abs(B) > 200 ? ' warn' : '');
     E.hApS.textContent = ap.engaged ? ap.status || 'ENG' : 'MANUAL';
     E.hAp.classList.toggle('on', ap.engaged);
     const z = zoneName(sub.depth);
     E.hZone.textContent = z[0];
     E.hEnv.textContent = `${fmt(toBar(pressureAt(sub.depth)), 0)} bar · ${fmt(temperatureAt(sub.depth), 1)}°C`;
-    this.qLight.classList.toggle('on', sys.powered('LIGHT') && sys.lights.main > 0);
+    // same on-test as toggleLights(): flood lamps alone also count as ON
+    this.qLight.classList.toggle('on', sys.powered('LIGHT') && (sys.lights.main > 0 || sys.lights.flood > 0));
     this.qFine.classList.toggle('on', g.controls.precision);
     this.qFlood.classList.toggle('run', sub.vbtFlow > 0); this.qPump.classList.toggle('run', sub.vbtFlow < 0);
-    this.tabBtns.dc.classList.toggle('alert', inc.active.some((f) => !f.resolved) && this.panel !== 'dc');
+    this.tabBtns.dc.classList.toggle('alert', inc.announced.length > 0 && this.panel !== 'dc');
 
     // banner: most severe unresolved fault
-    const act = inc.active.filter((f) => !f.resolved).sort((a, b) => b.sev - a.sev);
+    const act = inc.announced.sort((a, b) => b.sev - a.sev);
     if (act.length && this.panel !== 'dc') {
       const f = act[0];
       this.banner.className = 'hud-banner show ' + sevCls[f.sev] + (Math.sin(this._t * 8) > 0 && f.sev >= 3 ? ' blink' : '');
@@ -239,7 +243,7 @@ export class HUD {
       const v = h('div', 'ap-v'); c.appendChild(v);
       this._live(v, (e) => { const m = ap[key]; const val = 'target' in m ? m.target : m.rate; e.textContent = `${fmt(val, fmtd)} ${unit}`; });
       const row = h('div', 'ap-adj'); c.appendChild(row);
-      const adj = (d) => { const m = ap[key]; const f = 'target' in m ? 'target' : 'rate'; let x = m[f] + d; if (key === 'hdg') x = (x + 360) % 360; else x = Math.min(max, Math.max(min, x)); m[f] = +x.toFixed(2); };
+      const adj = (d) => { const m = ap[key]; const f = 'target' in m ? 'target' : 'rate'; let x = m[f] + d; if (key === 'hdg') { x = (x + 360) % 360; m.preset = true; } else x = Math.min(max, Math.max(min, x)); m[f] = +x.toFixed(2); };
       this._btn(row, '−' + big, () => adj(-big), 'sm'); this._btn(row, '−' + step, () => adj(-step), 'sm');
       this._btn(row, '+' + step, () => adj(step), 'sm'); this._btn(row, '+' + big, () => adj(big), 'sm');
     };
@@ -321,9 +325,19 @@ export class HUD {
     const pr = h('div', 'btnrow'); bg.appendChild(pr);
     const xt = this._btn(pr, '', () => { sys.cross = !sys.cross; sys.msg(`クロスタイ ${sys.cross ? '投入' : '開放'}`); }, 'amber');
     this._live(xt, (e) => { e.innerHTML = `X-TIE<small>${sys.cross ? 'ON 連系' : 'OFF'}</small>`; e.classList.toggle('on', sys.cross); });
-    for (const n of ['A', 'B']) { const b = this._btn(pr, '', () => { if (!sys.bat[n].online && sys.bat[n].soc <= 0) { sys.msg(`バッテリー${n} は枯渇している`, 'warn'); return; } sys.bat[n].online = !sys.bat[n].online; sys.msg(`バッテリー${n} ${sys.bat[n].online ? '接続' : '切離'}`, 'warn'); }); this._live(b, (e) => { e.innerHTML = `BATT ${n}<small>${sys.bat[n].online ? 'ONLINE' : 'OFFLINE'}</small>`; e.classList.toggle('on', sys.bat[n].online); }); }
+    // through Systems.setBattery(): empty-string and thermal-runaway interlocks (a string just cut off by its
+    // over-temperature protection could be re-connected immediately)
+    for (const n of ['A', 'B']) { const b = this._btn(pr, '', () => sys.setBattery(n, !sys.bat[n].online)); this._live(b, (e) => { const B = sys.bat[n]; e.innerHTML = `BATT ${n}<small>${B.online ? 'ONLINE' : B.fault === 'thermal' ? 'LOCKOUT' : 'OFFLINE'}</small>`; e.classList.toggle('on', B.online); }); }
     const tl = this._btn(pr, '', () => { sub.thrustLimit = sub.thrustLimit >= 1 ? 0.5 : sub.thrustLimit >= 0.5 ? 0.25 : 1; }); this._live(tl, (e) => { e.innerHTML = `推進制限<small>${fmt(sub.thrustLimit * 100)}%</small>`; });
     const tot = h('div', 'pr'); bg.appendChild(tot); this._live(tot, (e) => { const kwh = ['A', 'B', 'E'].reduce((s, n) => s + (sys.bat[n].online ? sys.bat[n].soc * sys.bat[n].cap : 0), 0); e.innerHTML = `総負荷 <b>${fmt(sys.totalPower / 1000, 2)} kW</b> · 残エネルギー ${fmt(kwh, 1)} kWh · 推定残時間 <b>${fmt(kwh / Math.max(0.3, sys.totalPower / 1000), 1)} h</b>`; });
+
+    // thrusters: isolate / re-connect (a thruster isolated from its DC card could never be re-connected)
+    const tg = this._grp(body, 'THRUSTERS スラスター');
+    const trow = h('div', 'btnrow'); tg.appendChild(trow);
+    for (const t of sub.thr) {
+      const b = this._btn(trow, '', () => { this.g.inc.setThruster(t.id, !t.enabled); this.g.audio.play('breaker'); }, 'sm');
+      this._live(b, (e) => { const st = !t.enabled ? 'OFF' : t.fault === 'failed' ? 'FAIL' : t.fault === 'thermal' ? 'TEMP' : t.fault === 'degraded' ? 'DEGR' : t.jam > 0 ? 'JAM' : 'ON'; e.innerHTML = `${t.id} ${t.name}<small>${st}</small>`; e.classList.toggle('on', t.enabled); e.classList.toggle('warn', t.enabled && st !== 'ON'); });
+    }
 
     // breakers
     const bk = this._grp(body, 'BREAKERS 配電盤');
@@ -344,7 +358,7 @@ export class HUD {
     // ballast & trim
     const ba = this._grp(body, 'BALLAST / TRIM バラスト・トリム');
     const bs = h('div', 'pr'); ba.appendChild(bs);
-    this._live(bs, (e) => { e.innerHTML = `VBT <b>${fmt(sub.vbt)} / 400 L</b> ${sub.vbtIsolated ? '<em>ISOLATED</em>' : ''} · 流量 ${fmt(sub.vbtFlow, 2)} L/s · 余剰浮力 <b>${fmt(-sub.trimState)} kg</b> · トリム ${fmt(sub.trim * 100)}% · ピッチ ${fmt(sub.pitch * 57.3, 1)}°`; });
+    this._live(bs, (e) => { e.innerHTML = `VBT <b>${fmt(sub.vbt)} / 400 L</b> ${sub.vbtIsolated ? '<em>ISOLATED</em>' : ''} · 流量 ${fmt(sub.vbtFlow, 2)} L/s · 余剰浮力 <b>${sgn(-sub.trimState)} kg</b> · トリム ${fmt(sub.trim * 100)}% · ピッチ ${fmt(sub.pitch * 57.3, 1)}°`; });
     const br = h('div', 'btnrow'); ba.appendChild(br);
     this._hold(br, '注水 FLOOD', (on) => this.g.vbtManual(on ? 1 : 0), 'blue');
     this._hold(br, '排水 PUMP', (on) => this.g.vbtManual(on ? -1 : 0), 'amber');

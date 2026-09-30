@@ -31,7 +31,6 @@ uniform sampler2D tDepth;
 uniform mat4 uInvProj;
 uniform mat4 uInvView;
 uniform vec3 uCamPos;
-uniform float uNear, uFar;
 uniform vec2 uRes;
 uniform float uFrame;
 uniform int uSpotCount;
@@ -52,11 +51,6 @@ vec3 viewRay(vec2 uv){
   vec4 c = uInvProj * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
   vec3 v = normalize(c.xyz / c.w);
   return normalize((uInvView * vec4(v, 0.0)).xyz);
-}
-float linDepth(float d){
-  // perspective depth -> view z distance
-  float z = d * 2.0 - 1.0;
-  return (2.0 * uNear * uFar) / (uFar + uNear - z * (uFar - uNear));
 }
 // cheap 2D noise for shafts
 float n2(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
@@ -204,7 +198,7 @@ varying vec2 vUv;
 uniform sampler2D tColor; uniform sampler2D tBloom;
 uniform float uExposure; uniform float uBloom; uniform float uTime; uniform vec2 uRes;
 uniform float uVignette; uniform float uCA; uniform float uGrain; uniform float uFlash; uniform vec3 uFlashColor;
-uniform float uBlackout; uniform float uShake; uniform float uRedAlert; uniform float uFog; uniform float uSmoke;
+uniform float uBlackout; uniform float uRedAlert; uniform float uFog; uniform float uSmoke;
 float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * .1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 vec3 RRTAndODTFit(vec3 v){ vec3 a = v*(v+0.0245786)-0.000090537; vec3 b = v*(0.983729*v+0.4329510)+0.238081; return a/b; }
 vec3 aces(vec3 c){
@@ -275,7 +269,7 @@ export class Pipeline {
       ...waterUniforms,
       tColor: { value: null }, tDepth: { value: null },
       uInvProj: { value: new THREE.Matrix4() }, uInvView: { value: new THREE.Matrix4() },
-      uCamPos: { value: new THREE.Vector3() }, uNear: { value: 0.1 }, uFar: { value: 1000 },
+      uCamPos: { value: new THREE.Vector3() },
       uRes: { value: new THREE.Vector2() }, uFrame: { value: 0 },
       uSpotCount: { value: 0 },
       uSpotPos: { value: Array.from({ length: MAX_SPOTS }, () => new THREE.Vector3()) },
@@ -292,7 +286,7 @@ export class Pipeline {
     this.finalMat = fsMat(FINAL_FRAG, {
       tColor: { value: null }, tBloom: { value: null }, uExposure: { value: 1 }, uBloom: { value: 0.8 }, uTime: { value: 0 },
       uRes: { value: new THREE.Vector2() }, uVignette: { value: 0.5 }, uCA: { value: 0.01 }, uGrain: { value: 0.03 },
-      uFlash: { value: 0 }, uFlashColor: { value: new THREE.Color() }, uBlackout: { value: 0 }, uShake: { value: 0 },
+      uFlash: { value: 0 }, uFlashColor: { value: new THREE.Color() }, uBlackout: { value: 0 },
       uRedAlert: { value: 0 }, uFog: { value: 0 }, uSmoke: { value: 0 },
     });
     this.spots = [];
@@ -360,7 +354,6 @@ export class Pipeline {
     u.uInvProj.value.copy(camera.projectionMatrixInverse);
     u.uInvView.value.copy(camera.matrixWorld);
     camera.getWorldPosition(u.uCamPos.value);
-    u.uNear.value = camera.near; u.uFar.value = camera.far;
     u.uFrame.value = this.frame;
     u.uScatterBoost.value = P.scatterBoost;
     u.uSilt.value = P.silt;

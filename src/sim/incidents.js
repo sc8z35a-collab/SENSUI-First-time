@@ -59,7 +59,7 @@ const CATALOGUE = [
       const b = c.sys.breakers[id];
       if (!b.closed || b.tripped) return null;
       b.tripped = true;
-      return { kind: 'elec', target: id, sev: 1, title: `地絡: ${b.name} ブレーカー トリップ`, en: `GND FAULT ${b.en}`, sfx: 'breaker', auto: true };
+      return { kind: 'elec', target: id, sev: 1, title: `地絡: ${b.name} ブレーカー トリップ`, en: `GND FAULT ${b.en}`, sfx: 'breaker' };
     },
   },
   {
@@ -169,13 +169,13 @@ const CATALOGUE = [
   {
     id: 'turbidity', w: 0.3, minDepth: 1000, apply(c) {
       c.env.turbidity = 1; c.env.turbidityT = 90 + rnd() * 120;
-      return { kind: 'env', target: 'current', sev: 1, title: '混濁流 (海底乱泥流) 発生 — 強い海流と視界不良', en: 'TURBIDITY CURRENT', sfx: 'rumble', shake: 0.3, auto: true };
+      return { kind: 'env', target: 'current', sev: 1, title: '混濁流 (海底乱泥流) 発生 — 強い海流と視界不良', en: 'TURBIDITY CURRENT', sfx: 'rumble', shake: 0.3 };
     },
   },
   {
     id: 'quake', w: 0.12, minDepth: 3000, apply(c) {
       c.env.quake = 6 + rnd() * 5;
-      return { kind: 'env', target: 'quake', sev: 2, title: '海底地震を検知 — 落石に注意', en: 'SEISMIC EVENT', sfx: 'rumble', shake: 1.0, auto: true };
+      return { kind: 'env', target: 'quake', sev: 2, title: '海底地震を検知 — 落石に注意', en: 'SEISMIC EVENT', sfx: 'rumble', shake: 1.0 };
     },
   },
   {
@@ -270,7 +270,10 @@ export class Incidents {
     this.cooldown = 40;
   }
 
-  get cautionCount() { return this.active.filter((f) => !f.resolved).length; }
+  // silent faults (a slowly drifting depth sensor) are not announced: they stay out of the caution count /
+  // banner / annunciators until the pilot could plausibly notice them (the flag was never read)
+  get cautionCount() { return this.active.filter((f) => !f.resolved && !f.silent).length; }
+  get announced() { return this.active.filter((f) => !f.resolved && !f.silent); }
 
   raise(f) {
     f.id = this.nextId++;
@@ -279,8 +282,20 @@ export class Incidents {
     this.active.push(f);
     this.history.push(f);
     if (f.shake) this.shake = Math.max(this.shake, f.shake);
-    this.onIncident?.(f);
+    if (!f.silent) this.onIncident?.(f);
     return f;
+  }
+  // SYS ▸ THRUSTERS switch. Re-connecting a still-faulty thruster brings its DC card back.
+  setThruster(id, on) {
+    const t = this.sub.thr.find((x) => x.id === id);
+    if (!t || t.enabled === on) return !!t;
+    t.enabled = on;
+    this.sys.msg(`${t.name}スラスター ${on ? '再接続' : '切り離し'}`, on ? 'info' : 'warn');
+    if (on && t.fault && !this.active.some((f) => !f.resolved && f.kind === 'thruster' && f.target === id)) {
+      const [ja, en] = t.fault === 'failed' ? ['故障 (モーターコントローラ)', 'MCU FAULT'] : t.fault === 'thermal' ? ['熱保護停止', 'THERMAL TRIP'] : ['軸受劣化', 'BEARING'];
+      this.raise({ kind: 'thruster', target: id, sev: 2, title: `${t.name}スラスター ${ja}`, en: `${t.en} ${en}` });
+    }
+    return true;
   }
 
   trigger(id) {
@@ -328,7 +343,7 @@ export class Incidents {
         // scrape raised a collision card (and rolled hull damage) every frame -> hundreds, then implosion
         if (e > 0.8 && (this._colT || 0) <= 0) {
           this._colT = 8;
-          const f = { kind: 'collision', target: 'hull', sev: e > 1.6 ? 3 : 2, title: `衝突！ 衝撃 ${(e * 1.5).toFixed(1)} G 相当`, en: 'COLLISION', auto: false };
+          const f = { kind: 'collision', target: 'hull', sev: e > 1.6 ? 3 : 2, title: `衝突！ 衝撃 ${(e * 1.5).toFixed(1)} G 相当`, en: 'COLLISION' };
           this.raise(f);
           // collision side effects
           // a damaged thruster gets its own DC card (it used to be silently degraded and unrepairable)
@@ -349,7 +364,7 @@ export class Incidents {
       if (t.temp > 95 && t.fault !== 'failed' && t.fault !== 'thermal') {
         t._preThermal = t.fault; // a worn bearing is not cured by cooling down
         t.fault = 'thermal';
-        this.raise({ kind: 'thruster', target: t.id, sev: 2, title: `${t.name}スラスター 熱保護停止`, en: `${t.en} THERMAL TRIP`, auto: true });
+        this.raise({ kind: 'thruster', target: t.id, sev: 2, title: `${t.name}スラスター 熱保護停止`, en: `${t.en} THERMAL TRIP` });
       }
       if (t.fault === 'thermal' && t.temp < 55) { t.fault = t._preThermal || null; t._preThermal = null; this.resolveWhere((f) => f.target === t.id && f.en.includes('THERMAL')); sys.msg(`${t.name}スラスター 冷却完了・復帰`); }
     }
@@ -379,6 +394,8 @@ export class Incidents {
       T.strength -= wig * dt * 0.02;
       if (T.strength <= 0) { this._freeTether(); sys.msg('絡まりから脱出した！', 'good'); }
     }
+    // a silent fault surfaces once its effect is large enough to be noticed against the backup gauge
+    for (const f of this.active) if (f.silent && !f.resolved && f.target === 'depth' && Math.abs(sys.sensors.depthDrift) > 40) { f.silent = false; this.onIncident?.(f); }
     // environment timers
     if (env.turbidityT > 0) { env.turbidityT -= dt; sub.currentExtra = 0.45 * Math.min(1, env.turbidityT / 20); if (env.turbidityT <= 0) { env.turbidity = 0; sub.currentExtra = 0; this.resolveWhere((f) => f.target === 'current'); } }
     if (env.quake > 0) { env.quake -= dt; this.shake = Math.max(this.shake, 0.35 + 0.3 * Math.sin(sub.time * 23)); if (env.quake <= 0) this.resolveWhere((f) => f.target === 'quake'); }
@@ -426,31 +443,38 @@ export class Incidents {
 
   _apply(f, pid) {
     const sub = this.sub, sys = this.sys;
+    // procedures report failure through fail(): the completion chime used to play 'good' on every outcome
+    let failed = false;
     const ok = (m) => { sys.msg(m, 'good'); };
+    const fail = (m, lvl = 'warn') => { failed = true; sys.msg(m, lvl); };
     switch (pid) {
       case 'isolate': sys.isolate(f.target); break;
       case 'clamp': sys.clampLeak(f.target, 0.35 + rnd() * 0.25); ok('クランプ増し締め完了 — 浸水量低下'); if (sys.pen[f.target].clamped > 0.95 && f.target !== 'VP') { sys.pen[f.target].leakArea = 0; f.resolved = true; } break;
-      case 'sealant': this.sealant--; if (rnd() < 0.8 || f.target !== 'VP') { sys.pen[f.target].leakArea = 0; sys.pen[f.target].clamped = 0; f.resolved = true; ok('シーラント硬化 — 浸水停止'); } else { sys.clampLeak(f.target, 0.4); sys.msg('シーラント部分的に効果 — 浸水は減少', 'warn'); } break;
+      case 'sealant': this.sealant--; if (rnd() < 0.8 || f.target !== 'VP') { sys.pen[f.target].leakArea = 0; sys.pen[f.target].clamped = 0; f.resolved = true; ok('シーラント硬化 — 浸水停止'); } else { sys.clampLeak(f.target, 0.4); fail('シーラント部分的に効果 — 浸水は減少'); } break;
       case 'reset': {
         const t = sub.thr.find((x) => x.id === f.target);
         if (!t) { f.resolved = true; break; }
-        if (t.fault === 'thermal' && t.temp > 70) { sys.msg(`${t.name} 巻線温度が高い — 冷却を待て`, 'warn'); break; }
-        if (t.fault === 'failed' && rnd() < 0.45) { sys.msg(`${t.name} 再起動失敗 — コントローラ応答なし`, 'warn'); break; }
-        if (t.fault === 'degraded' && rnd() < 0.7) { sys.msg(`${t.name} 軸受の異音は消えない (出力制限継続)`, 'warn'); break; }
+        if (t.fault === 'thermal' && t.temp > 70) { fail(`${t.name} 巻線温度が高い — 冷却を待て`); break; }
+        if (t.fault === 'failed' && rnd() < 0.45) { fail(`${t.name} 再起動失敗 — コントローラ応答なし`); break; }
+        if (t.fault === 'degraded' && rnd() < 0.7) { fail(`${t.name} 軸受の異音は消えない (出力制限継続)`); break; }
         t.fault = null; t._preThermal = null; t.enabled = true; t.temp = Math.min(t.temp, 60); f.resolved = true; ok(`${t.name} スラスター 復帰`); break;
       }
-      case 'disable': { const t = sub.thr.find((x) => x.id === f.target); if (!t) break; t.enabled = !t.enabled; if (!t.enabled) f.resolved = true; ok(`${t.name} ${t.enabled ? '再接続' : '切り離し'}`); break; }
-      case 'shake': if (sub.tether) { sub.tether.strength -= 0.35 + rnd() * 0.3; sub.w.y += (rnd() - 0.5) * 0.25; if (sub.tether.strength <= 0) { this._freeTether(); ok('網を振りほどいた！'); } else sys.msg('まだ絡まっている — 繰り返せ', 'warn'); } else { this._freeTether(); } break;
+      // isolating the thruster settles the card; it is re-connected from SYS ▸ THRUSTERS (setThruster), which
+      // re-raises the card while it is still faulty (the thruster used to be lost for good)
+      case 'disable': { const t = sub.thr.find((x) => x.id === f.target); if (!t) break; t.enabled = false; f.resolved = true; ok(`${t.name} 切り離し (SYS画面から再接続可)`); break; }
+      case 'shake': if (sub.tether) { sub.tether.strength -= 0.35 + rnd() * 0.3; sub.w.y += (rnd() - 0.5) * 0.25; if (sub.tether.strength <= 0) { this._freeTether(); ok('網を振りほどいた！'); } else fail('まだ絡まっている — 繰り返せ'); } else { this._freeTether(); } break;
       case 'jettison': this._freeTether(); sub.manipulatorLost = true; f.resolved = true; ok('マニピュレーター投棄 — 離脱成功'); break;
       case 'resetBreaker': {
         const b = sys.breakers[f.target];
-        if (sub.floodL > 200 && rnd() < 0.6) { sys.msg(`${b.name}: 地絡継続中 — 再トリップ`, 'warn'); break; }
+        if (!b) { f.resolved = true; break; }
+        if (sys.blocked(f.target)) { fail(`${b.name}: 貫通部が隔離中 — 投入不可`); break; }
+        if (sub.floodL > 200 && rnd() < 0.6) { fail(`${b.name}: 地絡継続中 — 再トリップ`); break; }
         b.tripped = false; b.closed = true; f.resolved = true; ok(`${b.name} 復電`); break;
       }
       case 'shed': sub.thrustLimit = Math.min(sub.thrustLimit, 0.5); if (sys.bat[f.target]) sys.bat[f.target].temp -= 4; ok('推進出力を50%に制限'); break;
       case 'isolateBat': { const b = sys.bat[f.target]; if (!b) { f.resolved = true; break; } b.online = false; sys.cross = true; f.resolved = true; ok(`バッテリー${f.target} 切り離し、クロスタイ投入`); break; }
-      case 'balance': { const b = sys.bat[f.target]; if (!b) { f.resolved = true; break; } if (b.fault === 'thermal' && rnd() < 0.5) { sys.msg('熱暴走は止まらない — 切り離せ！', 'alarm'); break; } b.fault = null; b.soc *= 0.94; f.resolved = true; ok('セルバランス完了'); break; }
-      case 'extinguish': sys.extinguish(); if (!sys.fire.active) f.resolved = true; break;
+      case 'balance': { const b = sys.bat[f.target]; if (!b) { f.resolved = true; break; } if (b.fault === 'thermal' && rnd() < 0.5) { fail('熱暴走は止まらない — 切り離せ！', 'alarm'); break; } b.fault = null; b.cellT = 0; b._cellWarn = false; b.soc *= 0.94; f.resolved = true; ok('セルバランス完了'); break; }
+      case 'extinguish': { const had = sys.fire.suppressant > 0; sys.extinguish(); if (!sys.fire.active) f.resolved = true; else if (!had) failed = true; if (had) this.onSfx?.('extinguish'); break; }
       case 'deenergize': { const b = sys.breakers[f.target]; if (b) b.closed = false; sys.fire.intensity *= 0.5; if (sys.fire.intensity < 0.02) { sys.fire.active = false; sys.fire.intensity = 0; f.resolved = true; } ok(`${b?.name ?? ''} 配電盤 遮断`); break; }
       case 'mask': sys.toggleMask(); break;
       case 'fixFan': sys.scrubber.fanOK = true; f.resolved = true; ok('スクラバーファン 交換完了'); break;
@@ -458,21 +482,25 @@ export class Incidents {
         sys._bypass = true; ok('O2 手動バイパス供給中'); f.resolved = true; break;
       case 'fixReg': sys.o2RegOK = true; sys._bypass = false; f.resolved = true; ok('レギュレーター 整備完了'); break;
       case 'isolateVBT': sub.vbtIsolated = true; sub._vbtStuckOpen = false; f.resolved = true; ok('VBT系統を隔離 — 注水停止 (VBT操作不能)'); break;
-      case 'drop': if (sub.dropWeight('descent') || sub.dropWeight('ascent')) { ok('ウェイト投棄'); this.onDrop?.(); } else sys.msg('投棄できるウェイトがない', 'warn'); break;
-      case 'fixPump': if (rnd() < 0.7) { sub.vbtPumpOK = true; f.resolved = true; ok('VBTポンプ 復帰'); } else sys.msg('ポンプ再起動失敗', 'warn'); break;
+      case 'drop': if (sub.dropWeight('descent') || sub.dropWeight('ascent')) { ok('ウェイト投棄'); this.onDrop?.(); } else fail('投棄できるウェイトがない'); break;
+      case 'fixPump': if (rnd() < 0.7) { sub.vbtPumpOK = true; f.resolved = true; ok('VBTポンプ 復帰'); } else fail('ポンプ再起動失敗'); break;
       case 'fixTrim': sub.trimPumpOK = true; f.resolved = true; ok('トリムポンプ 復帰'); break;
       case 'recal': sys.sensors.depth = true; sys.sensors.depthDrift = 0; f.resolved = true; ok('深度計 再校正完了'); break;
-      case 'reboot': if (rnd() < 0.75) { sys.sensors[f.target] = true; sys.sensors.gyroDrift = f.target === 'gyro' ? 0 : sys.sensors.gyroDrift; f.resolved = true; ok('機器 再起動成功'); } else sys.msg('再起動失敗 — 再試行せよ', 'warn'); break;
+      case 'reboot': if (rnd() < 0.75) { sys.sensors[f.target] = true; sys.sensors.gyroDrift = f.target === 'gyro' ? 0 : sys.sensors.gyroDrift; f.resolved = true; ok('機器 再起動成功'); } else fail('再起動失敗 — 再試行せよ'); break;
       case 'ack': f.resolved = true; break;
     }
-    this.onRepairDone?.(f, pid);
+    this.onRepairDone?.(f, pid, !failed);
+    return !failed;
   }
 
   // active faults are saved too: their physical state (leak area, thruster faults...) persists
   // across a reload, and without the card there was no way to repair them
   serialize() {
-    const plain = (f) => ({ kind: f.kind, target: f.target, sev: f.sev, title: f.title, en: f.en, note: f.note, loc: f.loc, t: f.t, id: f.id });
-    return { sealant: this.sealant, clock: this.clock, n: this.history.length, nextId: this.nextId, cooldown: this.cooldown, rateMul: this.rateMul, active: this.active.filter((f) => !f.resolved).map(plain) };
+    const plain = (f) => ({ kind: f.kind, target: f.target, sev: f.sev, title: f.title, en: f.en, note: f.note, loc: f.loc, t: f.t, id: f.id, silent: !!f.silent });
+    // environment event timers too: without them a reloaded turbidity current (currentExtra) / quake never ended
+    const E = this.env;
+    const env = { turbidity: E.turbidity || 0, turbidityT: E.turbidityT > 0 ? E.turbidityT : 0, quake: E.quake > 0 ? E.quake : 0 };
+    return { sealant: this.sealant, clock: this.clock, n: this.history.length, nextId: this.nextId, cooldown: this.cooldown, rateMul: this.rateMul, env, active: this.active.filter((f) => !f.resolved).map(plain) };
   }
   restore(d) {
     if (Number.isFinite(d.sealant)) this.sealant = d.sealant;
@@ -482,9 +510,14 @@ export class Incidents {
     this.active = []; this.history = [];
     for (const f of Array.isArray(d.active) ? d.active : []) {
       if (!f || typeof f.kind !== 'string') continue;
-      const g = { ...f, en: f.en || '', resolved: false };
+      const g = { ...f, en: f.en || '', silent: !!f.silent, resolved: false };
       this.active.push(g); this.history.push(g);
     }
+    const E = this.env, num = (v) => (Number.isFinite(v) && v > 0 ? v : 0);
+    if (d.env) { E.turbidity = num(d.env.turbidity) ? 1 : 0; E.turbidityT = num(d.env.turbidityT); E.quake = num(d.env.quake); }
+    // older saves had no env block: let an in-progress event run out instead of lasting forever
+    if (!(E.turbidityT > 0) && (this.sub.currentExtra > 0 || this.active.some((f) => f.target === 'current'))) { E.turbidity = 1; E.turbidityT = 20; }
+    if (!(E.quake > 0) && this.active.some((f) => f.target === 'quake')) E.quake = 2;
     // pad the incident counter so the end-screen statistic survives the reload
     for (let i = this.history.length; i < (d.n || 0); i++) this.history.push({ kind: 'past', resolved: true, en: '', target: '' });
     this.nextId = Math.max(d.nextId || 1, ...this.active.map((f) => (f.id || 0) + 1), 1);
